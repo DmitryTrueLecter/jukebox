@@ -1,7 +1,10 @@
 import io
 import json
+import socket
+import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -11,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core import Engine, Store
+from player import Player
 from reader import Reader, crc_a
 from server import handler_factory, upload
 
@@ -28,6 +32,9 @@ class FakePlayer:
 
     def play(self, path, offset=0.0):
         self.events.append(Path(path).name)
+
+    def seek(self, position):
+        self.events.append(("seek", position))
 
     def poll(self):
         if self.ended:
@@ -191,6 +198,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.engine.status()["audio_error"], "ALSA unavailable")
         self.assertEqual(self.player.events.count("a.mp3"), 1)
 
+    def test_seek_goes_to_player_and_needs_a_track(self):
+        with self.assertRaises(ValueError):
+            self.engine.seek(10)
+        self.engine.tick("TAG_A", 1)
+        self.engine.seek(-5)
+        self.assertEqual(self.player.events[-1], ("seek", 0.0))
+
     def test_ui_stop_survives_brief_tag_absence(self):
         self.engine.tick("TAG_A", 1)
         self.engine.manual_stop()
@@ -254,6 +268,55 @@ class ReaderTests(unittest.TestCase):
 
     def test_crc_known_halt_frame(self):
         self.assertEqual(crc_a([0x50, 0]), [0x57, 0xCD])
+
+
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "needs Unix sockets")
+class PlayerTests(unittest.TestCase):
+    def setUp(self):
+        fake = Path(__file__).with_name("fake_mpv.py")
+        self.player = Player(volume=50, mpv=[sys.executable, str(fake)])
+        self.addCleanup(self.player.close)
+
+    def poll_until(self, seconds=2):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            result = self.player.poll()
+            if result:
+                return result
+            time.sleep(0.02)
+        return None
+
+    def test_eof_reported_once(self):
+        self.player.play("track-eof.mp3")
+        self.assertEqual(self.poll_until(), "eof")
+        self.assertIsNone(self.poll_until(0.3))
+
+    def test_eof_of_replaced_track_is_ignored(self):
+        self.player.play("old-eof.mp3")
+        self.player.play("new.mp3")
+        self.assertIsNone(self.poll_until(0.5))
+
+    def test_load_error_raises(self):
+        self.player.play("broken.mp3")
+        with self.assertRaisesRegex(RuntimeError, "unrecognized"):
+            self.poll_until()
+
+    def test_crash_while_playing_raises_and_next_play_restarts(self):
+        self.player.play("crash.mp3")
+        with self.assertRaisesRegex(RuntimeError, "mpv"):
+            self.poll_until()
+        self.player.play("next-eof.mp3")
+        self.assertEqual(self.poll_until(), "eof")
+
+    def test_stop_keeps_elapsed_and_idle_has_no_position(self):
+        self.player.play("song.mp3")
+        self.assertEqual(self.player.position, 12.5)
+        self.assertEqual(self.player.duration, 60.0)
+        self.player.stop()
+        self.assertEqual(self.player.elapsed, 12.5)
+        self.assertIsNone(self.player.position)
+        with self.assertRaises(ValueError):
+            self.player.seek(3)
 
 
 class HttpTests(unittest.TestCase):

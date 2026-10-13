@@ -1,173 +1,195 @@
+"""Audio playback through one long-lived mpv process controlled over JSON IPC.
+
+mpv decodes on the fly and writes to the ALSA device "jukebox" (deploy/asound.conf),
+which mixes stereo to mono on both channels for the MAX98357A.
+"""
+import json
+import logging
 import os
+import socket
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
-import logging
-import subprocess
-import tempfile
 
-LOG = logging.getLogger('jukebox.audio')
-
-_WAV_HEADER = 44
-_BYTES_PER_SEC = 48000 * 2 * 2  # 48 kHz, stereo, 16-bit = 192000
+LOG = logging.getLogger("jukebox.audio")
 
 
 class Player:
-    def __init__(self, volume=35, device='plughw:CARD=MAX98357A,DEV=0'):
+    def __init__(self, volume=35, device="alsa/jukebox", mpv="mpv"):
         self.level = volume
         self.device = device
+        self.mpv = [mpv] if isinstance(mpv, str) else list(mpv)
+        self.elapsed = 0.0  # position at the last stop(), used for resume
         self.process = None
-        self.output = None
-        self._feeder_thread = None
-        self._play_start = None
-        self._offset = 0.0
-        self.elapsed = 0.0
-        self._prepared_path = None
+        self.sock = None
+        self.socket_path = Path(tempfile.gettempdir()) / f"jukebox-mpv-{os.getpid()}.sock"
+        self.lock = threading.RLock()  # serializes commands
+        self.cond = threading.Condition()  # guards responses/events, filled by the reader thread
+        self.responses = {}
+        self.events = []
+        self.next_id = 0
+        self.entry = None  # mpv playlist_entry_id of the file we are playing
 
-    def prepare(self, path):
-        path = Path(path)
-        cache = path.parent.parent / "pcm-cache"
-        cache.mkdir(exist_ok=True)
-        stat = path.stat()
-        target = cache / f"{path.stem}-{stat.st_size}-{stat.st_mtime_ns}-v{self.level}-right.wav"
-        if target.exists():
-            return target
-        fd, name = tempfile.mkstemp(suffix=".wav", dir=cache)
-        os.close(fd)
-        temp = Path(name)
-        try:
-            LOG.info("PREPARE %s", path)
-            result = subprocess.run([
-                "ffmpeg", "-y", "-v", "error", "-nostdin", "-i", str(path),
-                "-vn", "-af", f"aformat=channel_layouts=stereo,pan=stereo|c0=0*c0|c1=c1,volume={self.level / 100}",
-                "-ar", "48000", "-c:a", "pcm_s16le", "-bitexact", "-map_metadata", "-1", str(temp)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
-            if result.returncode:
-                raise RuntimeError("ffmpeg: " + result.stderr.decode(errors="replace")[-3000:])
-            os.replace(temp, target)
-            return target
-        finally:
-            temp.unlink(missing_ok=True)
+    # --- mpv process and IPC ---------------------------------------------
 
-    @staticmethod
-    def _feed_wav(wav_path, audio_skip, write_fd):
-        try:
-            with open(wav_path, 'rb') as f:
-                header = bytearray(f.read(_WAV_HEADER))
-                orig_data = int.from_bytes(header[40:44], 'little')
-                new_data = max(0, orig_data - audio_skip)
-                header[40:44] = new_data.to_bytes(4, 'little')
-                header[4:8] = (36 + new_data).to_bytes(4, 'little')
-                os.write(write_fd, bytes(header))
-                f.seek(_WAV_HEADER + audio_skip)
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    os.write(write_fd, chunk)
-        except OSError:
-            pass
-        finally:
+    def _alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def _start(self):
+        self._shutdown()
+        self.socket_path.unlink(missing_ok=True)
+        self.process = subprocess.Popen([
+            *self.mpv, "--idle=yes", "--no-config", "--no-video", "--no-terminal",
+            "--load-scripts=no", "--ytdl=no", "--ao=alsa", f"--audio-device={self.device}",
+            f"--volume={self.level}", f"--input-ipc-server={self.socket_path}",
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 5
+        while True:
             try:
-                os.close(write_fd)
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.connect(str(self.socket_path))
+                break
+            except OSError:
+                sock.close()
+                if self.process.poll() is not None:
+                    raise RuntimeError(f"mpv не запустился, код {self.process.returncode}")
+                if time.monotonic() > deadline:
+                    raise RuntimeError("mpv не открыл IPC-сокет")
+                time.sleep(0.05)
+        self.sock = sock
+        with self.cond:
+            self.responses.clear()
+            self.events.clear()
+        threading.Thread(target=self._read, args=(sock,), daemon=True).start()
+        LOG.info("MPV started pid=%s device=%s", self.process.pid, self.device)
+
+    def _read(self, sock):
+        try:
+            for line in sock.makefile("rb"):
+                message = json.loads(line)
+                with self.cond:
+                    if "request_id" in message:
+                        self.responses[message["request_id"]] = message
+                        self.cond.notify_all()
+                    elif message.get("event") == "end-file":
+                        self.events.append(message)
+        except (OSError, ValueError):
+            pass
+
+    def _command(self, *command, timeout=5):
+        if not self._alive():
+            self._start()
+        with self.cond:
+            self.next_id += 1
+            request_id = self.next_id
+        payload = json.dumps({"command": list(command), "request_id": request_id}) + "\n"
+        self.sock.sendall(payload.encode())
+        with self.cond:
+            if not self.cond.wait_for(lambda: request_id in self.responses, timeout):
+                raise RuntimeError(f"mpv не ответил на {command[0]}")
+            response = self.responses.pop(request_id)
+        if response.get("error") != "success":
+            raise RuntimeError(f"mpv {command[0]}: {response.get('error')}")
+        return response.get("data")
+
+    def _get(self, name):
+        if self.entry is None or not self._alive():
+            return None
+        try:
+            return self._command("get_property", name, timeout=1)
+        except (OSError, RuntimeError):
+            return None
+
+    def _shutdown(self):
+        if self.sock is not None:
+            try:
+                self.sock.sendall(b'{"command": ["quit"]}\n')
             except OSError:
                 pass
+            self.sock.close()
+            self.sock = None
+        if self.process is not None:
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+            self.process = None
+        self.socket_path.unlink(missing_ok=True)
+
+    # --- interface used by Engine ------------------------------------------
 
     @property
     def position(self):
-        if self._play_start is None:
-            return None
-        return self._offset + (time.monotonic() - self._play_start)
+        with self.lock:
+            return self._get("time-pos")
 
     @property
     def duration(self):
-        if self._prepared_path is None:
-            return None
-        try:
-            size = self._prepared_path.stat().st_size
-            audio_bytes = max(0, size - _WAV_HEADER)
-            return audio_bytes / _BYTES_PER_SEC
-        except OSError:
-            return None
+        with self.lock:
+            return self._get("duration")
 
     def play(self, path, offset=0.0):
-        self.stop()
-        prepared = self.prepare(path)
-        self._prepared_path = prepared
-        self._offset = offset
-        self._play_start = time.monotonic()
-        self.output = tempfile.TemporaryFile()
-        if offset > 0.0:
-            audio_skip = (int(offset * _BYTES_PER_SEC) // 4) * 4
-            file_size = prepared.stat().st_size
-            audio_skip = min(audio_skip, max(0, file_size - _WAV_HEADER))
-            read_fd, write_fd = os.pipe()
-            self._feeder_thread = threading.Thread(
-                target=self._feed_wav, args=(prepared, audio_skip, write_fd), daemon=True
-            )
-            self._feeder_thread.start()
-            args = ['aplay', '-D', self.device, '--buffer-size=48000', '--period-size=12000', '-']
-            LOG.info("PLAY %s device=%s volume=%s offset=%.1f", prepared, self.device, self.level, offset)
-            try:
-                self.process = subprocess.Popen(args, stdin=read_fd, stdout=self.output, stderr=subprocess.STDOUT)
-                os.close(read_fd)
-            except Exception:
-                os.close(read_fd)
-                self.output.close()
-                self.output = None
-                raise
-        else:
-            self._feeder_thread = None
-            args = ["aplay", "-D", self.device, "--buffer-size=48000", "--period-size=12000", str(prepared)]
-            LOG.info("PLAY %s device=%s volume=%s", prepared, self.device, self.level)
-            try:
-                self.process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=self.output, stderr=subprocess.STDOUT)
-            except Exception:
-                self.output.close()
-                self.output = None
-                raise
+        with self.lock:
+            self.stop()
+            options = f"start={offset:.3f}" if offset > 0 else ""
+            result = self._command("loadfile", str(path), "replace", -1, options)
+            self.entry = result["playlist_entry_id"]
+            LOG.info("PLAY %s volume=%s offset=%.1f", path, self.level, offset)
+
+    def seek(self, position):
+        with self.lock:
+            if self.entry is None:
+                raise ValueError("Ничего не воспроизводится")
+            self._command("seek", max(0.0, position), "absolute")
 
     def poll(self):
-        if self.process is None:
+        with self.lock:
+            if self.process is not None and not self._alive():
+                code = self.process.returncode
+                playing = self.entry is not None
+                self._shutdown()
+                self.entry = None
+                LOG.error("MPV exited code=%s", code)
+                if playing:
+                    raise RuntimeError(f"mpv завершился с кодом {code}")
+                return None
+            with self.cond:
+                events, self.events = self.events, []
+            for event in events:
+                if self.entry is None or event.get("playlist_entry_id") != self.entry:
+                    continue  # a file we already replaced or stopped
+                self.entry = None
+                if event.get("reason") == "eof":
+                    LOG.info("EOF")
+                    return "eof"
+                if event.get("reason") == "error":
+                    detail = event.get("file_error", "unknown error")
+                    LOG.error("MPV playback error: %s", detail)
+                    raise RuntimeError(f"Ошибка воспроизведения: {detail}")
             return None
-        code = self.process.poll()
-        if code is None:
-            return None
-        self._play_start = None
-        self._feeder_thread = None
-        self.output.seek(0)
-        detail = self.output.read()[-12000:].decode('utf-8', errors='replace')
-        self.output.close()
-        self.output = None
-        self.process = None
-        if code != 0:
-            LOG.error('APLAY exit=%s: %s', code, detail)
-            raise RuntimeError(f'aplay завершился с кодом {code}: {detail[-3000:]}')
-        LOG.info('EOF')
-        return 'eof'
 
     def stop(self):
-        if self._play_start is not None:
-            self.elapsed = self._offset + (time.monotonic() - self._play_start)
-            self._play_start = None
-        self._prepared_path = None
-        if self.process is not None:
-            if self.process.poll() is None:
-                LOG.info('STOP')
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait()
-            self.process = None
-        self._feeder_thread = None
-        if self.output:
-            self.output.close()
-            self.output = None
+        with self.lock:
+            if self.entry is None:
+                return
+            position = self._get("time-pos")
+            if position is not None:
+                self.elapsed = position
+            self.entry = None
+            if self._alive():
+                LOG.info("STOP")
+                self._command("stop")
 
     def volume(self, value):
-        self.level = value
+        with self.lock:
+            self.level = value
+            if self._alive():
+                self._command("set_property", "volume", value)
 
     def close(self):
-        self.stop()
+        with self.lock:
+            self.entry = None
+            self._shutdown()

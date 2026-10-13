@@ -58,6 +58,31 @@ else
     echo "    unchanged"
 fi
 
+echo "==> ALSA config"
+if ! cmp -s deploy/asound.conf /etc/asound.conf; then
+    as_root install -m 644 deploy/asound.conf /etc/asound.conf
+    echo "    updated"
+else
+    echo "    unchanged"
+fi
+
+echo "==> WirePlumber rule"
+wp_dir="$HOME/.config/wireplumber/wireplumber.conf.d"
+wp_conf="$wp_dir/50-jukebox.conf"
+if ! cmp -s deploy/wireplumber-jukebox.conf "$wp_conf"; then
+    mkdir -p "$wp_dir"
+    install -m 644 deploy/wireplumber-jukebox.conf "$wp_conf"
+    runtime="/run/user/$(id -u)"
+    if [ -d "$runtime" ] && XDG_RUNTIME_DIR="$runtime" systemctl --user is-active -q wireplumber; then
+        XDG_RUNTIME_DIR="$runtime" systemctl --user restart wireplumber
+        echo "    updated, wireplumber restarted"
+    else
+        echo "    updated (wireplumber not running)"
+    fi
+else
+    echo "    unchanged"
+fi
+
 previous=$(readlink "$APP_DIR/current" 2>/dev/null || true)
 
 switch_to() {

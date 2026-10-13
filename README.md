@@ -7,7 +7,7 @@ Raspberry Pi 3 + RC522 + MAX98357A. Controlled from a browser, no access key.
 - One disc is bound to one track.
 - Read-dropout protection is a separate setting in milliseconds, 1000 ms by default.
 - While the time since the last read is below that value, a missing tag does not interrupt playback. The same tag returning within that window does not restart the track.
-- Once the window expires, tag-started playback stops. Re-inserting the disc starts the track from the beginning (or from the saved position when "continue playback" is enabled).
+- Once the window expires, tag-started playback stops. Re-inserting the disc starts the track from the beginning, or from the saved position when "continue playback" is enabled.
 - When a tag-started track ends, the app checks (with the protection window) whether the tag is still there and starts the track again.
 - "Stop" with a disc inserted silences the audio and suppresses autoplay. Resume with "Play", or remove the disc for longer than the protection window and insert it again.
 - Without a disc, "Play" plays the track once. "Stop" ends it early.
@@ -43,7 +43,7 @@ cd ~/jukebox-manager
 bash install.sh
 ```
 
-The installer creates the Python environment, installs ffmpeg and mfrc522, adds the user to the spi/gpio/audio groups, and enables the service. Run it as your normal user, not via `sudo bash`.
+The installer installs mpv, ffmpeg and build tools, adds the user to the spi/gpio/audio groups and creates `~/jukebox-data`. Then run `./deploy.ps1` from the development machine: it installs the code, venv, systemd unit and ALSA config. Run the installer as your normal user, not via `sudo bash`.
 
 ## Adding tracks
 
@@ -60,14 +60,12 @@ Formats: MP3, FLAC, WAV, OGG, M4A, AAC, OPUS, up to 200 MB per file. Identical f
 
 ## Audio
 
-The path verified on the device: a pre-rendered WAV, PCM S16_LE, 48 kHz, stereo with silence on the left and the source's right channel on the right. Playback via aplay with buffer-size=48000 and period-size=12000. This temporarily uses only the right channel of the source rather than a stereo mix.
+mpv runs as one long-lived process (controlled over JSON IPC), decodes on the fly and writes to the ALSA device `jukebox` defined in `/etc/asound.conf` (`deploy/asound.conf`). That device mixes stereo to (L+R)/2 on both channels, so the mono MAX98357A plays the full mix whatever channel mode its SD pin selects. Volume and seeking apply immediately.
 
-FFmpeg prepares the WAV before playback starts; there is no streaming decode. Prepared files are kept in `~/jukebox-data/pcm-cache`. The first play of a new file may be delayed by preparation. WAV takes more space than MP3. The cache can be deleted while the service is stopped and will be rebuilt. Source tracks are never modified.
-
-Volume applies from the next track start, as noted in the UI. Each volume value produces its own WAV version.
-
-On the user's device the prepared WAV played through aplay with these buffers without hiss. The root cause of the channel issue has not been identified yet.
-
+Hardware notes:
+- Amp SD is wired to GPIO4 (pin 7); the `max98357a` overlay keeps the amp off while idle.
+- A 1000 µF capacitor across the amp's Vin/GND and a proper power supply are required. With a weak supply the Pi brownout-resets when playback starts. `vcgencmd get_throttled` should read `0x0`.
+- The desktop's PipeWire/WirePlumber is told to ignore the amp card (`deploy/wireplumber-jukebox.conf`).
 ## Diagnostics
 
 ```bash

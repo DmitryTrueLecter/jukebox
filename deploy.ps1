@@ -77,7 +77,7 @@ try {
 
     # --- staging: copy files, force LF in text files -----------------------
     $exclude = '^(\.claude/|\.idea/|\.env|\.git|CLAUDE\.md$|deploy\.ps1$|frontend/)'
-    $textExt = '\.(py|sh|service|html|css|js|json|txt|md|cfg|toml)$'
+    $textExt = '\.(py|sh|service|conf|html|css|js|json|txt|md|cfg|toml)$'
     $stage = Join-Path $work 'stage'
     foreach ($rel in $files) {
         if ($rel -match $exclude) { continue }

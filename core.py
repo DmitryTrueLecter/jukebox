@@ -149,11 +149,7 @@ class Engine:
         with self.lock:
             if self.track is None:
                 raise ValueError("Ничего не воспроизводится")
-            data = self.store.snapshot()
-            track = data["tracks"][self.track]
-            path = self.store.root / "music" / track["file"]
-            self.player.play(path, offset=max(0.0, position))
-            self.audio_error = None
+            self.player.seek(max(0.0, position))
 
     def unbind(self, uid):
         with self.lock:
