@@ -11,14 +11,15 @@ Based on the Hack Club project https://codex.hackclub.com/project-blogs/jukebox/
 - Audio: generic MAX98357A I2S amplifier (mono) + 4 Ω 3 W speaker. Wiring: BCLK→pin 12, LRC→pin 35, DIN→pin 40, Vin→5 V, GND, **SD→GPIO4 (pin 7)**, GAIN unconnected (9 dB). 1000 µF/16 V capacitor across amp Vin/GND
 - The `max98357a` overlay drives SD_MODE on GPIO4: low (amp off) when idle, high (3.3 V = "left channel" mode) while playing. The ALSA `jukebox` device mixes (L+R)/2 into both channels, so the amp's channel mode does not matter
 - Power is critical: an undersized PSU/cable caused instant brownout resets (`vcgencmd get_rsts` = 0x1000) right when a stream started. Check `vcgencmd get_throttled` stays `0x0` after hardware changes
-- `/boot/firmware/config.txt` has `dtparam=spi=on` and `dtoverlay=max98357a`. No `asound.conf`. The installer never touches `config.txt`
+- `/boot/firmware/config.txt` has `dtparam=spi=on`, `dtoverlay=max98357a`, `dtoverlay=disable-bt`; `vc4-kms-v3d`/`max_framebuffers` commented out, camera/display auto-detect off (backup: `config.txt.bak-20261013`). The installer never touches `config.txt`
+- Headless since 2026-10-13: boots to `multi-user.target` (no lightdm/desktop, no HDMI card, so the amp is ALSA card 0, always addressed by name `MAX98357A`). Disabled: Raspberry Pi Connect, the user's PipeWire/WirePlumber/filter-chain/mpris-proxy (masked), bluetooth, rpcbind/NFS, udisks2, accounts-daemon, the serial console `serial-getty@ttyAMA0` (masked). Wi-Fi power save is off (`/etc/NetworkManager/conf.d/wifi-powersave-off.conf`). Keep avahi (`jukebox.local`), ssh, NetworkManager. Restore the desktop with `sudo systemctl set-default graphical.target`
 
 ## Files
 
 - `core.py`: `Store` holds `library.json` with atomic writes (tmp + fsync + os.replace + directory fsync). `Engine` is the playback/binding state machine; every method runs under `self.lock`
 - `server.py`: `ThreadingHTTPServer`, API, uploads, and `worker()`, the NFC polling loop (~150 ms) that calls `engine.tick(uid)`
 - `player.py`: `Player`. One long-lived `mpv --idle` process controlled over JSON IPC (Unix socket in the temp dir), output `--ao=alsa --audio-device=alsa/jukebox`. Decodes on the fly; `seek`, live `volume`, `time-pos`/`duration` come from mpv. `end-file` events are matched by `playlist_entry_id` so a replaced track's EOF is ignored. mpv is restarted lazily if it dies
-- `reader.py`: `Reader` on top of `mfrc522==0.0.7` (REQA → Anticoll → HALT)
+- `reader.py`: `Reader` on top of `mfrc522==0.0.7` (REQA → Anticoll → HALT). HALT goes out with the Transmit command (the library's Transceive would busy-poll ~10 ms for a reply that never comes); an empty reader gets one attempt per poll, a present tag up to 3. ~5 ms per read with a tag, ~13 ms without; the service idles at ~9% of one core
 - `index.html`: single-page UI, no build step, no dependencies. One-line JS, polls `/api/status` about once a second
 - `install.sh`: venv, apt packages, spi/gpio/audio groups, systemd unit `jukebox-manager.service`
 - `tests/test_jukebox.py`: unittest with `FakePlayer`, `FakeChip` and `tests/fake_mpv.py` (fake mpv IPC server; Player tests need Unix sockets, so they are skipped on Windows); no hardware needed
@@ -73,5 +74,3 @@ sudo systemctl restart jukebox-manager
 ## Known issues
 
 - `reader.py` returns only the 4 CL1 bytes. For NTAG215 that is `88` + 3 UID bytes (e.g. `885324B0`), not the full 7-byte UID
-- `server.py` `log_message`: on a timeout before the request line is parsed there is no `self.command`, so an `AttributeError` lands in the journal
-- Leftovers on the Pi: `~/jukebox-venv`, `tmpo7oy32sf/`, old files and `.venv` in the root of `~/jukebox-manager`, `~/jukebox-manager.service.bak`, `access-key.txt`, the `remove_delay` setting

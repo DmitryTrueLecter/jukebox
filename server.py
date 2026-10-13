@@ -143,7 +143,8 @@ def handler_factory(engine):
                 self.send(500, {"error": str(exc)})
 
         def log_message(self, fmt, *args):
-            if self.command != "GET" or self.path != "/api/status":
+            # command/path are unset when the request line never arrived (e.g. a timeout)
+            if getattr(self, "command", None) != "GET" or getattr(self, "path", None) != "/api/status":
                 LOG.info("%s %s", self.address_string(), fmt % args)
     return Handler
 

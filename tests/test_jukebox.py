@@ -219,19 +219,33 @@ class FakeChip:
     MI_ERR = 2
     PICC_REQALL = 0x52
     PCD_TRANSCEIVE = 0x0C
+    PCD_IDLE = 0x00
+    CommandReg, FIFODataReg, FIFOLevelReg, BitFramingReg = 0x01, 0x09, 0x0A, 0x0D
 
     def __init__(self, uid, corrupt=False, version=0x82):
         self.uid = bytes.fromhex(uid)
         self.corrupt, self.version = corrupt, version
+        self.present = True
+        self.requests = 0
+        self.fifo = []
+        self.commands = []
 
     def Read_MFRC522(self, register):
         return self.version
 
     def Write_MFRC522(self, register, value):
-        pass
+        if register == self.FIFODataReg:
+            self.fifo.append(value)
+        elif register == self.CommandReg:
+            self.commands.append(value)
+
+    def SetBitMask(self, register, mask):
+        if register == self.FIFOLevelReg and mask & 0x80:
+            self.fifo.clear()
 
     def MFRC522_Request(self, command):
-        return self.MI_OK, 16
+        self.requests += 1
+        return (self.MI_OK, 16) if self.present else (self.MI_ERR, 0)
 
     def MFRC522_Anticoll(self):
         if self.corrupt:
@@ -261,6 +275,23 @@ class ReaderTests(unittest.TestCase):
 
     def test_corrupt_bcc_does_not_bind(self):
         self.assertIsNone(Reader(FakeChip("04AABB11223344", corrupt=True)).read())
+
+    def test_halt_is_transmitted_without_waiting_for_a_reply(self):
+        chip = FakeChip("DEADBEEF")
+        Reader(chip).read()
+        self.assertEqual(chip.fifo, [0x50, 0x00, 0x57, 0xCD])
+        self.assertEqual(chip.commands[-2:], [0x04, chip.PCD_IDLE])  # Transmit, then Idle
+
+    def test_retries_only_while_a_tag_was_present(self):
+        chip = FakeChip("DEADBEEF")
+        reader = Reader(chip)
+        reader.read()
+        chip.present, chip.requests = False, 0
+        self.assertIsNone(reader.read())  # tag just vanished: retried
+        self.assertEqual(chip.requests, 3)
+        chip.requests = 0
+        self.assertIsNone(reader.read())  # still empty: single attempt
+        self.assertEqual(chip.requests, 1)
 
     def test_disconnected_reader(self):
         with self.assertRaises(RuntimeError):
