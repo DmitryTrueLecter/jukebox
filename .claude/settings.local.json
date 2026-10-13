@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:jukebox.local)",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 jukebox@jukebox.local \"echo connected && systemctl status jukebox 2>/dev/null || echo ''no systemd service''\")",
+      "Bash(sshpass -p '7275' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 jukebox@jukebox.local \"echo connected\")",
+      "Bash(curl -s http://jukebox.local:8080/api/status)",
+      "Bash(curl -s -X POST http://jukebox.local:8080/api/play -H \"X-Jukebox: 1\" -H \"Content-Type: application/json\" -d '{\"\"track\"\": \"\"aa333f6900ad5e3511755f862ffdb390c89de29600ac73b86bb10075ff21a93e\"\"}')",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:github.com)",
+      "Bash(python3 -m unittest discover -s tests -v)",
+      "Bash(/c/Python313/python.exe -m unittest discover -s tests -v)",
+      "Bash(cmd //c \"cd /d D:\\\\Work\\\\jukebox && py -m unittest discover -s tests -v 2>&1\")",
+      "WebSearch"
+    ]
+  }
+}
