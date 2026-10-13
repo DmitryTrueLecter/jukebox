@@ -19,7 +19,7 @@ class Store:
         if self.path.exists():
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
             if self.data.get("version") != 1:
-                raise ValueError("Неподдерживаемая версия library.json")
+                raise ValueError("Unsupported library.json version")
 
         if "read_grace_ms" not in self.data["settings"]:
             self.update(lambda d: d["settings"].update(read_grace_ms=1000))

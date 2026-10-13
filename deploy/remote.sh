@@ -12,7 +12,7 @@ as_root() {
     elif [ -n "$PW" ]; then
         printf '%s\n' "$PW" | sudo -S -p '' "$@"
     else
-        echo "sudo требует пароль: задай JUKEBOX_PASSWORD в .env" >&2
+        echo "sudo needs a password: set JUKEBOX_PASSWORD in .env" >&2
         exit 1
     fi
 }
@@ -31,14 +31,14 @@ if [ "$(cat "$venv/.requirements.sha256" 2>/dev/null)" != "$req_hash" ]; then
     "$venv/bin/pip" install -q -r requirements.txt
     echo "$req_hash" > "$venv/.requirements.sha256"
 else
-    echo "    зависимости не изменились"
+    echo "    requirements unchanged"
 fi
 
 if [ "$RUN_TESTS" = "1" ]; then
-    echo "==> тесты"
+    echo "==> tests"
     if ! "$venv/bin/python" -m unittest discover -s tests -q; then
         rm -rf -- "$release_dir"
-        echo "!! тесты не прошли, релиз удалён, служба не тронута" >&2
+        echo "!! tests failed, release removed, service untouched" >&2
         exit 1
     fi
 fi
@@ -53,9 +53,9 @@ if [ "$rendered" != "$(cat "$unit" 2>/dev/null)" ]; then
     rm -f "$tmp"
     as_root systemctl daemon-reload
     as_root systemctl enable -q jukebox-manager.service
-    echo "    обновлён"
+    echo "    updated"
 else
-    echo "    без изменений"
+    echo "    unchanged"
 fi
 
 previous=$(readlink "$APP_DIR/current" 2>/dev/null || true)
@@ -76,20 +76,20 @@ healthy() {
     return 1
 }
 
-echo "==> переключение на $RELEASE"
+echo "==> switching to $RELEASE"
 switch_to "releases/$RELEASE"
 if ! healthy; then
-    echo "!! служба не отвечает на /api/status" >&2
+    echo "!! service does not answer /api/status" >&2
     journalctl -u jukebox-manager -n 30 --no-pager >&2 || true
     if [ -n "$previous" ]; then
-        echo "!! откат на $previous" >&2
+        echo "!! rolling back to $previous" >&2
         switch_to "$previous"
-        healthy || echo "!! после отката служба тоже не отвечает" >&2
+        healthy || echo "!! service still not answering after rollback" >&2
     fi
     exit 1
 fi
 
-echo "==> очистка старых релизов (оставляю $KEEP)"
+echo "==> pruning old releases (keeping $KEEP)"
 cd "$APP_DIR/releases"
 ls -1 | sort -r | tail -n +"$((KEEP + 1))" | while read -r old; do
     if [ "releases/$old" != "$previous" ]; then
@@ -97,4 +97,4 @@ ls -1 | sort -r | tail -n +"$((KEEP + 1))" | while read -r old; do
     fi
 done
 
-echo "==> готово: $RELEASE"
+echo "==> done: $RELEASE"

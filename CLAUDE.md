@@ -1,76 +1,76 @@
 # CLAUDE.md
 
-Физический NFC-jukebox. Пользователь вставляет «диск» с NFC-меткой, и играет привязанный к ней трек. Управление через веб-интерфейс на порту 8080.
+A physical NFC jukebox. You insert a "disc" carrying an NFC tag and the track bound to that tag plays. Controlled through a web UI on port 8080.
 
-За основу взят проект Hack Club: https://codex.hackclub.com/project-blogs/jukebox/ (Pi Zero 2 W, python-vlc, ID меток зашиты в `if/elif`). От оригинала осталась только идея и железо RC522 + MAX98357A. Код полностью переписан.
+Based on the Hack Club project https://codex.hackclub.com/project-blogs/jukebox/ (Pi Zero 2 W, python-vlc, tag IDs hardcoded in an `if/elif` chain). Only the idea and the RC522 + MAX98357A hardware are kept; the code is a full rewrite.
 
-## Железо и система
+## Hardware and system
 
-- Raspberry Pi 3 Model B Rev 1.2, Debian 13 trixie (64-бит, ядро 6.18), Python 3.13, ffmpeg 7.1
-- NFC: RC522 по SPI (`bus=0, device=0`, RST на пине 22 в нумерации BOARD). Метки NTAG215
-- Звук: I2S-усилитель MAX98357A (моно), ALSA-устройство `plughw:CARD=MAX98357A,DEV=0`
-- В `/boot/firmware/config.txt` есть `dtparam=spi=on` и `dtoverlay=max98357a`. `asound.conf` нет. Установщик `config.txt` не трогает
+- Raspberry Pi 3 Model B Rev 1.2, Debian 13 trixie (64-bit, kernel 6.18), Python 3.13, ffmpeg 7.1
+- NFC: RC522 over SPI (`bus=0, device=0`, RST on BOARD pin 22), NTAG215 tags
+- Audio: MAX98357A I2S amplifier (mono), ALSA device `plughw:CARD=MAX98357A,DEV=0`
+- `/boot/firmware/config.txt` has `dtparam=spi=on` and `dtoverlay=max98357a`. No `asound.conf`. The installer never touches `config.txt`
 
-## Файлы
+## Files
 
-- `core.py`: `Store` хранит `library.json` с атомарной записью (tmp + fsync + os.replace + fsync каталога). `Engine` — конечный автомат воспроизведения и привязки, все методы под `self.lock`
-- `server.py`: `ThreadingHTTPServer`, API, загрузка файлов, `worker()` — цикл чтения NFC каждые ~150 мс, вызывает `engine.tick(uid)`
-- `player.py`: `Player`. ffmpeg заранее готовит WAV в `pcm-cache`, затем `aplay` его играет. Seek/resume реализованы через подачу WAV в pipe с пропуском байтов
-- `reader.py`: `Reader` на базе библиотеки `mfrc522==0.0.7` (REQA → Anticoll → HALT)
-- `index.html`: одностраничный интерфейс без сборки и зависимостей. JS в одну строку, опрашивает `/api/status` примерно раз в секунду
-- `install.sh`: venv, apt-пакеты, группы spi/gpio/audio, systemd-юнит `jukebox-manager.service`
-- `tests/test_jukebox.py`: unittest с `FakePlayer` и `FakeChip`, железо не нужно
+- `core.py`: `Store` holds `library.json` with atomic writes (tmp + fsync + os.replace + directory fsync). `Engine` is the playback/binding state machine; every method runs under `self.lock`
+- `server.py`: `ThreadingHTTPServer`, API, uploads, and `worker()`, the NFC polling loop (~150 ms) that calls `engine.tick(uid)`
+- `player.py`: `Player`. ffmpeg pre-renders a WAV into `pcm-cache`, then `aplay` plays it. Seek/resume feed the WAV through a pipe, skipping bytes
+- `reader.py`: `Reader` on top of `mfrc522==0.0.7` (REQA → Anticoll → HALT)
+- `index.html`: single-page UI, no build step, no dependencies. One-line JS, polls `/api/status` about once a second
+- `install.sh`: venv, apt packages, spi/gpio/audio groups, systemd unit `jukebox-manager.service`
+- `tests/test_jukebox.py`: unittest with `FakePlayer` and `FakeChip`; no hardware needed
 
-## Данные (`~/jukebox-data`)
+## Data (`~/jukebox-data`)
 
 - `library.json`: `{"version": 1, "tracks": {sha256: {title, file, original}}, "tags": {uid: track_id}, "settings": {volume, read_grace_ms, continue_playback}}`
-- `music/`: исходники под именем `<sha256>.<ext>`
-- `pcm-cache/`: `<stem>-<size>-<mtime_ns>-v<volume>-right.wav`. Можно удалить при остановленной службе
+- `music/`: originals stored as `<sha256>.<ext>`
+- `pcm-cache/`: `<stem>-<size>-<mtime_ns>-v<volume>-right.wav`. Safe to delete while the service is stopped
 
-## Логика Engine
+## Engine logic
 
-- `tick(uid)`: отсутствие метки короче `read_grace_ms` не прерывает трек. Возврат той же метки в этом окне трек не перезапускает
-- `source`: `"tag"` или `"manual"`. После EOF трек от метки повторяется, если метка на месте. Ручной запуск играет один раз
-- `suppressed`: uid, для которого автозапуск подавлен (после «Стопа», ошибки или привязки). Сбрасывается, когда метку вынимают дольше, чем на grace
-- Привязка: `arm` → фаза `remove` (≥0.5 с без меток) → `scan` → при необходимости `conflict` → `confirm` → `save_binding`. Таймаут 120 с. После привязки трек сам не запускается
-- `continue_playback`: при снятии метки позиция сохраняется в `_resume_positions`. Хранится только в памяти и пропадает при рестарте
+- `tick(uid)`: a missing tag shorter than `read_grace_ms` does not interrupt the track; the same tag returning within that window does not restart it
+- `source`: `"tag"` or `"manual"`. After EOF a tag-started track repeats while the tag is present; a manual start plays once
+- `suppressed`: uid whose autoplay is suppressed (after Stop, an error, or binding). Cleared when the tag is removed for longer than the grace period
+- Binding: `arm` → `remove` phase (≥0.5 s with no tags) → `scan` → optional `conflict` → `confirm` → `save_binding`. 120 s timeout. Nothing autoplays after binding
+- `continue_playback`: on tag removal the position is saved in `_resume_positions`. Kept in memory only; lost on restart
 
 ## API
 
-Все POST требуют заголовок `X-Jukebox: 1` (защита от CSRF). Авторизации нет.
-`GET /api/status`. POST: `/api/play {track}`, `/api/stop`, `/api/seek {position}`, `/api/bind {track}`, `/api/confirm {uid, track}`, `/api/cancel`, `/api/unbind {uid}`, `/api/settings {volume, read_grace_ms, continue_playback}`, `/api/upload?name=...` (тело — сырые байты файла, до 200 МБ; форматы mp3/flac/wav/ogg/m4a/aac/opus).
+Every POST requires the `X-Jukebox: 1` header (CSRF guard). No authentication.
+`GET /api/status`. POST: `/api/play {track}`, `/api/stop`, `/api/seek {position}`, `/api/bind {track}`, `/api/confirm {uid, track}`, `/api/cancel`, `/api/unbind {uid}`, `/api/settings {volume, read_grace_ms, continue_playback}`, `/api/upload?name=...` (raw file bytes as body, up to 200 MB; mp3/flac/wav/ogg/m4a/aac/opus).
 
-## Команды
+## Commands
 
 ```bash
-python3 -m unittest discover -s tests -v   # запускать на Pi или в WSL: на Windows fsync каталога не работает
+python3 -m unittest discover -s tests -v   # run on the Pi or WSL: directory fsync fails on Windows
 python3 server.py --data ~/jukebox-data --port 8080
 journalctl -u jukebox-manager -n 80 --no-pager
 sudo systemctl restart jukebox-manager
 ```
 
-## Устройство и деплой
+## Device and deploy
 
-- Подключение и пароль лежат в `.env` (в gitignore, шаблон в `.env.example`). Пароль нужен для SSH и для sudo на Pi
-- Деплой: `./deploy.ps1` (флаги `-DryRun`, `-SkipTests`, `-InstallKey`). Берёт рабочую копию с незакоммиченными изменениями (`git ls-files -co --exclude-standard`), переводит переносы строк в LF, кладёт её в `releases/<дата>-<sha>[-dirty]`, запускает тесты на Pi, переключает симлинк `current`, перезапускает службу и проверяет `/api/status`. Если проверка не прошла, откатывается на предыдущий релиз
-- Логика на стороне Pi: `deploy/remote.sh`. Шаблон юнита: `deploy/jukebox-manager.service` с плейсхолдерами `@APP_DIR@` и т.п.
-- Раскладка на Pi: `~/jukebox-manager/{releases/, current -> releases/..., venv/}`. venv общий, `pip install` запускается только при изменении `requirements.txt`. В `/etc/systemd/system/jukebox-manager.service.d/override.conf` есть ручной override (NoNewPrivileges=false, UMask=0022)
-- Фронтенд собирается локально: если есть `frontend/package.json`, deploy.ps1 запускает `npm run build`, а `frontend/dist` уезжает в `static/`. На Pi ничего не собирать
-- SSH вручную с Windows без sshpass: `askpass.cmd` с `@echo <пароль>`, переменные `SSH_ASKPASS=<путь>`, `SSH_ASKPASS_REQUIRE=force`, `DISPLAY=x`. scp не понимает `{a,b}`
-- `~/jukebox-data` деплой никогда не трогает
-- Перед ручными тестами железа останавливать службу, иначе два процесса будут делить RC522 и ALSA
+- Connection settings and password live in `.env` (gitignored; template in `.env.example`). The password is used for SSH and for sudo on the Pi
+- Deploy: `./deploy.ps1` (flags `-DryRun`, `-SkipTests`, `-InstallKey`). Takes the working tree including uncommitted changes (`git ls-files -co --exclude-standard`), converts line endings to LF, uploads to `releases/<date>-<sha>[-dirty]`, runs tests on the Pi, switches the `current` symlink, restarts the service and checks `/api/status`, rolling back to the previous release on failure
+- Pi-side logic: `deploy/remote.sh`. Unit template: `deploy/jukebox-manager.service` with `@APP_DIR@`-style placeholders
+- Layout on the Pi: `~/jukebox-manager/{releases/, current -> releases/..., venv/}`. The venv is shared; `pip install` runs only when `requirements.txt` changes. `/etc/systemd/system/jukebox-manager.service.d/override.conf` holds a manual override (NoNewPrivileges=false, UMask=0022)
+- The frontend is built locally: if `frontend/package.json` exists, deploy.ps1 runs `npm run build` and ships `frontend/dist` as `static/`. Never build on the Pi
+- Manual SSH from Windows without sshpass: `askpass.cmd` containing `@echo <password>`, env `SSH_ASKPASS=<path>`, `SSH_ASKPASS_REQUIRE=force`, `DISPLAY=x`. scp does not expand `{a,b}`
+- Deploy never touches `~/jukebox-data`
+- Stop the service before manual hardware tests, otherwise two processes fight over RC522 and ALSA
 
-## Соглашения
+## Conventions
 
-- Сообщения в интерфейсе и ошибки (`ValueError`) на русском. Ошибки из `ValueError` уходят клиенту как HTTP 400
-- Только стандартная библиотека Python плюс `mfrc522`. Новые зависимости не добавлять без необходимости
-- Внешние процессы (ffmpeg, ffprobe, aplay) вызывать списком аргументов, без shell
+- Language: everything is in English (code, comments, docs, logs, scripts) except text shown in the web UI, which is Russian. That includes `index.html` and the backend strings that reach the UI: `engine.message`, `ValueError` messages (returned as HTTP 400), `reader_error`, `audio_error`
+- Python standard library plus `mfrc522` only. Do not add dependencies without a good reason
+- Call external processes (ffmpeg, ffprobe, aplay) with argument lists, never through a shell
 
-## Известные проблемы
+## Known issues
 
-- `reader.py` возвращает только 4 байта CL1. У NTAG215 это `88` + 3 байта UID (например, `885324B0`), а не полный 7-байтовый UID. README в этом месте неточен
-- `server.py`, `log_message`: при таймауте до разбора запроса нет `self.command`, и в журнал сыплется `AttributeError`
-- Кэш WAV не чистится: каждое значение громкости создаёт отдельную копию каждого трека
-- Звук идёт только из правого канала исходника (левый заглушён), это временное решение после аппаратных проверок
-- `install.sh` ставит лишний `mpv`. На Pi остались `~/jukebox-venv`, `tmpo7oy32sf/`, `access-key.txt`, настройка `remove_delay`
-- `vcgencmd get_throttled` = `0x50000`: были просадки питания и троттлинг. Стоит проверить блок питания
+- `reader.py` returns only the 4 CL1 bytes. For NTAG215 that is `88` + 3 UID bytes (e.g. `885324B0`), not the full 7-byte UID
+- `server.py` `log_message`: on a timeout before the request line is parsed there is no `self.command`, so an `AttributeError` lands in the journal
+- The WAV cache is never pruned: each volume value creates its own copy of every track
+- Only the right channel of the source is played (left is muted); a temporary workaround after hardware tests
+- `install.sh` still writes the old-layout unit and installs an unused `mpv`. Leftovers on the Pi: `~/jukebox-venv`, `tmpo7oy32sf/`, old files and `.venv` in the root of `~/jukebox-manager`, `access-key.txt`, the `remove_delay` setting
+- `vcgencmd get_throttled` = `0x50000`: under-voltage and throttling have occurred. Check the power supply

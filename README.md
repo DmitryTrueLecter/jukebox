@@ -1,50 +1,41 @@
-# Jukebox Manager, обновление 2
+# Jukebox Manager
 
-Raspberry Pi 3 + RC522 + MAX98357A. Управление через браузер без ключа доступа.
+Raspberry Pi 3 + RC522 + MAX98357A. Controlled from a browser, no access key.
 
-## Поведение
+## Behavior
 
-- Один диск связан с одним треком.
-- Защита от пропусков чтения задаётся отдельным параметром в миллисекундах. По умолчанию 1000 мс.
-- Пока интервал с последнего чтения меньше этого значения, отсутствие метки не прерывает воспроизведение. Возврат той же метки внутри интервала не перезапускает трек.
-- После истечения интервала воспроизведение от метки останавливается. Повторная вставка запускает трек с начала.
-- После окончания трека, запущенного меткой, приложение проверяет её присутствие с учётом защиты и запускает трек снова. Бесконечный повтор внутри mpv не используется.
-- «Стоп» при вставленном диске выключает звук и подавляет автоматический запуск. Возобновить можно кнопкой «Плей» или извлечением диска на время защиты и повторной вставкой.
-- Без диска «Плей» запускает трек один раз. «Стоп» останавливает его досрочно.
-- Вставка другого диска переключает трек, в том числе при воспроизведении, начатом кнопкой.
-- При запуске кнопкой трека, соответствующего вставленному диску, дальнейшее поведение соответствует воспроизведению от диска.
-- После привязки музыка не запускается. Вынь метку, дождись окончания интервала защиты и вставь снова.
-- У активного трека кнопка меняется на «Стоп», строка подсвечивается. Это работает и при запуске меткой. Состояние обновляется примерно раз в секунду.
+- One disc is bound to one track.
+- Read-dropout protection is a separate setting in milliseconds, 1000 ms by default.
+- While the time since the last read is below that value, a missing tag does not interrupt playback. The same tag returning within that window does not restart the track.
+- Once the window expires, tag-started playback stops. Re-inserting the disc starts the track from the beginning (or from the saved position when "continue playback" is enabled).
+- When a tag-started track ends, the app checks (with the protection window) whether the tag is still there and starts the track again.
+- "Stop" with a disc inserted silences the audio and suppresses autoplay. Resume with "Play", or remove the disc for longer than the protection window and insert it again.
+- Without a disc, "Play" plays the track once. "Stop" ends it early.
+- Inserting a different disc switches the track, including during playback started from the button.
+- Starting, via the button, the track bound to the inserted disc behaves like tag playback from then on.
+- Nothing plays after binding. Remove the tag, wait for the protection window to pass, and insert it again.
+- The active track's button turns into "Stop" and its row is highlighted, including for tag playback. The state refreshes about once a second.
 
-## Входы, выходы и крайние случаи
+## Inputs, outputs and edge cases
 
-Входы: одна NFC-метка возле RC522, локальные аудиофайлы и действия в браузере. Выходы: звук на MAX98357A, состояние/ошибки в интерфейсе и журнале службы, сохранённые файлы и привязки в `~/jukebox-data`.
+Inputs: one NFC tag near the RC522, local audio files, and browser actions. Outputs: sound on the MAX98357A, state/errors in the UI and the service journal, stored files and bindings in `~/jukebox-data`.
 
-Неизвестная метка останавливает предыдущий трек и отображается в интерфейсе. Одновременное чтение нескольких меток не поддерживается. Ошибка проигрывателя отображается в браузере и журнале, бесконечные попытки запуска неисправного файла подавляются. Кнопка «Плей» позволяет повторить попытку. Ошибка считывателя не мешает ручному запуску без диска.
+An unknown tag stops the previous track and is shown in the UI. Reading several tags at once is not supported. Player errors are shown in the browser and the journal; endless restart attempts of a broken file are suppressed, and "Play" lets you retry. A reader failure does not prevent manual playback without a disc.
 
-## Обновление существующей установки
+## Deploying
 
-В PowerShell из папки с архивом:
+From the development machine (Windows, PowerShell):
 
 ```powershell
-scp .\jukebox-manager.tar.gz jukebox@192.168.1.153:~/
+Copy-Item .env.example .env   # once; fill in host, user and password
+./deploy.ps1                  # -DryRun to only build the archive, -SkipTests to skip tests on the Pi
 ```
 
-На Pi:
+The script uploads the working tree to `~/jukebox-manager/releases/<id>` on the Pi, runs the tests there, switches the `current` symlink, restarts `jukebox-manager` and rolls back if the service does not answer. Music and bindings in `~/jukebox-data` are never touched.
 
-```bash
-sudo systemctl stop jukebox-manager
-tar -xzf ~/jukebox-manager.tar.gz -C ~
-sudo systemctl start jukebox-manager
-```
+## Fresh install
 
-После обновления открой http://192.168.1.153:8080 и нажми Ctrl+F5. Если IP изменился, используй актуальный адрес Pi.
-
-Повторная установка пакетов не нужна. Музыка и привязки сохраняются в `~/jukebox-data`, архив их не содержит и не заменяет. Старый параметр задержки в секундах перестаёт использоваться. Новый параметр начинается с 1000 мс. Старый файл `access-key.txt` не используется.
-
-## Новая установка
-
-Распакуй архив в домашнюю папку. Звук и SPI должны быть настроены заранее. Установщик не меняет `config.txt` и Wi-Fi.
+Audio and SPI must be configured beforehand (`dtparam=spi=on`, `dtoverlay=max98357a` in `config.txt`). The installer does not change `config.txt` or Wi-Fi.
 
 ```bash
 tar -xzf ~/jukebox-manager.tar.gz -C ~
@@ -52,62 +43,61 @@ cd ~/jukebox-manager
 bash install.sh
 ```
 
-Установщик создаёт Python-окружение, ставит mpv/ffmpeg и mfrc522, добавляет пользователя в группы spi/gpio/audio и включает автозапуск службы. Запускай его обычным пользователем, не через `sudo bash`.
+The installer creates the Python environment, installs ffmpeg and mfrc522, adds the user to the spi/gpio/audio groups, and enables the service. Run it as your normal user, not via `sudo bash`.
 
-## Добавление треков
+## Adding tracks
 
-1. Открой веб-интерфейс.
-2. Выбери один или несколько аудиофайлов для загрузки.
-3. У нужного трека нажми «Привязать метку».
-4. Убери метки от считывателя, дождись приглашения и поднеси нужную.
-5. Если метка уже связана с другим треком, подтверди замену или отмени.
-6. После сохранения вынь и повторно вставь диск.
+1. Open the web UI.
+2. Choose one or more audio files to upload.
+3. Click "Bind tag" on the track.
+4. Move all tags away from the reader, wait for the prompt, and present the tag.
+5. If the tag is already bound to another track, confirm the replacement or cancel.
+6. After saving, remove and re-insert the disc.
 
-На NFC ничего не записывается. Полный UID связан с файлом на SD-карте. Несколько меток могут быть связаны с одним треком. Привязку можно удалить отдельно от файла.
+Nothing is written to the NFC tag. The tag UID is mapped to a file on the SD card. Several tags can be bound to the same track. A binding can be removed independently of the file.
 
-Форматы: MP3, FLAC, WAV, OGG, M4A, AAC, OPUS. До 200 МБ на файл. Идентичный файл не дублируется, разные файлы с одинаковым названием сохраняются отдельно. Ошибки декодирования отображаются при воспроизведении.
+Formats: MP3, FLAC, WAV, OGG, M4A, AAC, OPUS, up to 200 MB per file. Identical files are not duplicated; different files with the same name are stored separately. Decoding errors show up at playback time.
 
-## Звук: исправление после аппаратных проверок
+## Audio
 
-Используется проверенный на устройстве путь: готовый WAV, PCM S16_LE, 48 кГц, стерео с тишиной слева и исходным правым каналом справа. Воспроизведение через aplay с buffer-size=48000 и period-size=12000. Это временно использует только правый канал исходной записи, а не смесь стереоканалов.
+The path verified on the device: a pre-rendered WAV, PCM S16_LE, 48 kHz, stereo with silence on the left and the source's right channel on the right. Playback via aplay with buffer-size=48000 and period-size=12000. This temporarily uses only the right channel of the source rather than a stereo mix.
 
-FFmpeg подготавливает WAV до начала воспроизведения, декодирование в потоке не используется. Готовые файлы сохраняются в `~/jukebox-data/pcm-cache`. При первом запуске нового файла возможна задержка подготовки. WAV занимает больше места, чем MP3. Кэш можно удалить при остановленной службе, он будет создан снова. Исходные треки не изменяются.
+FFmpeg prepares the WAV before playback starts; there is no streaming decode. Prepared files are kept in `~/jukebox-data/pcm-cache`. The first play of a new file may be delayed by preparation. WAV takes more space than MP3. The cache can be deleted while the service is stopped and will be rebuilt. Source tracks are never modified.
 
-Громкость применяется при следующем запуске трека, это указано в интерфейсе. Каждое выбранное значение громкости создаёт свою версию WAV. Управление по NFC и ручной стоп не изменены. Неисправность обнаружения NFC этим обновлением не исправлена.
+Volume applies from the next track start, as noted in the UI. Each volume value produces its own WAV version.
 
-На устройстве пользователя отдельный подготовленный WAV воспроизвёлся через aplay с указанными буферами без шипения. Работа обновлённого приложения требует проверки после установки. Общая причина изменения звука между каналами пока не установлена.
+On the user's device the prepared WAV played through aplay with these buffers without hiss. The root cause of the channel issue has not been identified yet.
 
-## Диагностика
+## Diagnostics
 
 ```bash
 journalctl -u jukebox-manager -n 80 --no-pager
 sudo systemctl status jukebox-manager --no-pager
 ```
 
-Перед отдельными аппаратными тестами останавливай службу, чтобы два процесса не использовали RC522 или звуковой выход одновременно:
+Stop the service before standalone hardware tests so two processes don't share the RC522 or the audio output:
 
 ```bash
 sudo systemctl stop jukebox-manager
 ```
 
-После тестов:
+Afterwards:
 
 ```bash
 sudo systemctl start jukebox-manager
 ```
 
-## Данные
+## Data
 
-`~/jukebox-data/library.json` хранит настройки и привязки. `~/jukebox-data/music` хранит файлы. Для резервной копии останови службу и скопируй целиком `~/jukebox-data`. Сохранение JSON выполняется через временный файл и атомарную замену.
+`~/jukebox-data/library.json` stores settings and bindings; `~/jukebox-data/music` stores the files. For a backup, stop the service and copy the whole `~/jukebox-data`. JSON is saved through a temporary file and an atomic replace.
 
-## Проверки
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-Проверяются пропуски чтения, повтор после конца трека, ручной однократный запуск, ручной стоп при вставленном диске, смена диска, сохранение старых привязок, вход без ключа, полный UID, ошибки обмена и тайм-аут.
+Covered: read dropouts, repeat after track end, one-shot manual play, manual stop with a disc inserted, disc swap, preservation of existing bindings, access without a key, tag UID reading, communication errors, and timeouts.
 
-Зависимости и документация:
+Dependencies and docs:
 - https://github.com/pimylifeup/MFRC522-python (mfrc522 0.0.7, GPLv3)
-- https://mpv.io/manual/stable/
