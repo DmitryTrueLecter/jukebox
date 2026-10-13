@@ -1,0 +1,19 @@
+[Unit]
+Description=NFC Jukebox Manager
+After=sound.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=spi gpio audio
+WorkingDirectory=@APP_DIR@/current
+ExecStart=@APP_DIR@/venv/bin/python @APP_DIR@/current/server.py --data @DATA_DIR@ --port @PORT@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

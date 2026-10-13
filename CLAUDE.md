@@ -51,10 +51,13 @@ sudo systemctl restart jukebox-manager
 
 ## Устройство и деплой
 
-- SSH: `jukebox@jukebox.local`. Пароль даёт пользователь, в репозиторий его не записывать
-- С Windows без sshpass: `askpass.cmd` с `@echo <пароль>` в scratchpad, переменные `SSH_ASKPASS=<путь>`, `SSH_ASKPASS_REQUIRE=force`, `DISPLAY=x`. scp не понимает `{a,b}`, файлы копировать по одному
-- Приложение: `~/jukebox-manager` (с `.venv`), служба `jukebox-manager.service`, данные в `~/jukebox-data`
-- Деплой: остановить службу, скопировать `*.py`, `index.html` и `tests/` в `~/jukebox-manager`, запустить службу. Данные не трогать
+- Подключение и пароль лежат в `.env` (в gitignore, шаблон в `.env.example`). Пароль нужен для SSH и для sudo на Pi
+- Деплой: `./deploy.ps1` (флаги `-DryRun`, `-SkipTests`, `-InstallKey`). Берёт рабочую копию с незакоммиченными изменениями (`git ls-files -co --exclude-standard`), переводит переносы строк в LF, кладёт её в `releases/<дата>-<sha>[-dirty]`, запускает тесты на Pi, переключает симлинк `current`, перезапускает службу и проверяет `/api/status`. Если проверка не прошла, откатывается на предыдущий релиз
+- Логика на стороне Pi: `deploy/remote.sh`. Шаблон юнита: `deploy/jukebox-manager.service` с плейсхолдерами `@APP_DIR@` и т.п.
+- Раскладка на Pi: `~/jukebox-manager/{releases/, current -> releases/..., venv/}`. venv общий, `pip install` запускается только при изменении `requirements.txt`. В `/etc/systemd/system/jukebox-manager.service.d/override.conf` есть ручной override (NoNewPrivileges=false, UMask=0022)
+- Фронтенд собирается локально: если есть `frontend/package.json`, deploy.ps1 запускает `npm run build`, а `frontend/dist` уезжает в `static/`. На Pi ничего не собирать
+- SSH вручную с Windows без sshpass: `askpass.cmd` с `@echo <пароль>`, переменные `SSH_ASKPASS=<путь>`, `SSH_ASKPASS_REQUIRE=force`, `DISPLAY=x`. scp не понимает `{a,b}`
+- `~/jukebox-data` деплой никогда не трогает
 - Перед ручными тестами железа останавливать службу, иначе два процесса будут делить RC522 и ALSA
 
 ## Соглашения

@@ -204,6 +204,7 @@ class FakeChip:
     MI_OK = 0
     MI_ERR = 2
     PICC_REQALL = 0x52
+    PCD_TRANSCEIVE = 0x0C
 
     def __init__(self, uid, corrupt=False, version=0x82):
         self.uid = bytes.fromhex(uid)
@@ -211,6 +212,9 @@ class FakeChip:
 
     def Read_MFRC522(self, register):
         return self.version
+
+    def Write_MFRC522(self, register, value):
+        pass
 
     def MFRC522_Request(self, command):
         return self.MI_OK, 16
@@ -223,6 +227,9 @@ class FakeChip:
         block = [0x88] + remaining[:3] if cascade else remaining[:4]
         bcc = block[0] ^ block[1] ^ block[2] ^ block[3]
         return self.MI_OK, block + [bcc]
+
+    def MFRC522_ToCard(self, command, data):
+        return self.MI_ERR, [], 0  # HALT is never acknowledged by a tag
 
     def Close_MFRC522(self):
         pass
