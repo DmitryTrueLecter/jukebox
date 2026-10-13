@@ -72,11 +72,14 @@ try {
     if (Test-Path (Join-Path $frontend 'package.json')) {
         Write-Host "==> building frontend"
         Push-Location $frontend
-        try { npm run build; if ($LASTEXITCODE) { throw "npm run build failed" } } finally { Pop-Location }
+        try {
+            if (-not (Test-Path node_modules)) { npm ci; if ($LASTEXITCODE) { throw "npm ci failed" } }
+            npm run build; if ($LASTEXITCODE) { throw "npm run build failed" }
+        } finally { Pop-Location }
     }
 
     # --- staging: copy files, force LF in text files -----------------------
-    $exclude = '^(\.claude/|\.idea/|\.env|\.git|CLAUDE\.md$|deploy\.ps1$|frontend/)'
+    $exclude = '^(\.claude/|\.idea/|\.env|\.git|CLAUDE\.md$|deploy\.ps1$|frontend/|scripts/)'
     $textExt = '\.(py|sh|service|conf|html|css|js|json|txt|md|cfg|toml)$'
     $stage = Join-Path $work 'stage'
     foreach ($rel in $files) {

@@ -1,0 +1,29 @@
+:root {
+  --bg: #f6f5f2;
+  --surface: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #2f6fdf;
+  --border: #e3e1dc;
+  --error: #b42318;
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161618; --surface: #1f1f22; --text: #f2f2f2; --muted: #9a9aa0; --border: #2e2e33; color-scheme: dark; }
+}
+body { margin: 0; background: var(--bg); color: var(--text); }
+.app { max-width: 960px; margin: 0 auto; padding: 24px 24px 96px; }
+.header { display: flex; align-items: baseline; justify-content: space-between; }
+.header h1 { margin: 0; font-size: 24px; }
+.connection { font-size: 13px; color: var(--muted); }
+.connection.offline { color: var(--error); }
+.message { color: var(--muted); }
+.error { color: var(--error); }
+.muted { color: var(--muted); }
+.tracks { width: 100%; border-collapse: collapse; background: var(--surface); border-radius: 8px; overflow: hidden; }
+.tracks th, .tracks td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+.tracks th { font-size: 12px; font-weight: 500; color: var(--muted); }
+.tracks tr.active td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+button { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.player { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 16px; align-items: center; padding: 12px 24px; background: var(--surface); border-top: 1px solid var(--border); }

@@ -1,0 +1,2 @@
+# Test-only; installed on the Pi by deploy/remote.sh to run the suite.
+httpx2==2.13.1

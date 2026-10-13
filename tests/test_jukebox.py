@@ -1,22 +1,23 @@
-import io
 import json
 import socket
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import unittest
-import urllib.error
-import urllib.request
 from collections import deque
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 from core import Engine, Store
 from player import Player
 from reader import Reader, crc_a
-from server import handler_factory, upload
+from fastapi.testclient import TestClient
+
+from server import create_app, status_key
+
+JUKEBOX = {"X-Jukebox": "1"}
 
 
 class FakePlayer:
@@ -53,13 +54,12 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.store = Store(self.temp.name)
+        self.store = self.open_store()
         for name in ("a", "b"):
             (self.store.root / "music" / (name + ".mp3")).write_bytes(b"fake")
-        def seed(data):
-            data["tracks"] = {name: {"title": name, "file": name + ".mp3"} for name in ("a", "b")}
-            data["tags"] = {"TAG_A": "a", "TAG_B": "b"}
-        self.store.update(seed)
+            self.store.add_track(name, name, name + ".mp3", name + ".mp3")
+        self.store.bind_tag("TAG_A", "a")
+        self.store.bind_tag("TAG_B", "b")
         self.player = FakePlayer()
         self.now = 0.0
         self.engine = Engine(self.store, self.player, lambda: self.now)
@@ -104,7 +104,7 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.confirm("TAG_B", "b")
         self.engine.confirm("TAG_A", "b")
-        self.assertEqual(Store(self.temp.name).snapshot()["tags"]["TAG_A"], "b")
+        self.assertEqual(self.open_store().snapshot()["tags"]["TAG_A"], "b")
 
     def test_new_binding_and_cancel_do_not_autoplay(self):
         self.scan_ready()
@@ -122,13 +122,16 @@ class EngineTests(unittest.TestCase):
             self.engine.confirm("TAG_A", "b")
         self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], "a")
 
-    def test_failed_save_preserves_previous_mapping(self):
-        with patch("core.os.replace", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                self.store.update(lambda d: d["tags"].clear())
-        self.assertIn("TAG_A", self.store.snapshot()["tags"])
-        self.assertIn("TAG_A", Store(self.temp.name).snapshot()["tags"])
+    def open_store(self):
+        store = Store(self.temp.name)
+        self.addCleanup(store.db.close)
+        return store
 
+    def test_failed_write_rolls_back(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.bind_tag("TAG_A", "no-such-track")  # foreign key violation
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], "a")
+        self.assertEqual(self.open_store().snapshot()["tags"]["TAG_A"], "a")
     def test_eof_repeats_with_tag(self):
         self.engine.tick("TAG_A", 1)
         self.player.ended = True
@@ -182,13 +185,9 @@ class EngineTests(unittest.TestCase):
         self.engine.tick("TAG_A", 2.1)
         self.assertEqual(self.player.events.count("a.mp3"), 2)
 
-    def test_default_milliseconds_and_old_data_preserved(self):
-        self.assertEqual(self.store.snapshot()["settings"]["read_grace_ms"], 1000)
-        self.store.update(lambda d: d["settings"].pop("read_grace_ms"))
-        restored = Store(self.temp.name)
-        self.assertEqual(restored.snapshot()["settings"]["read_grace_ms"], 1000)
-        self.assertEqual(restored.snapshot()["tags"]["TAG_A"], "a")
-
+    def test_default_settings(self):
+        self.assertEqual(self.store.snapshot()["settings"],
+                         {"volume": 35, "read_grace_ms": 1000, "continue_playback": False})
     def test_player_error_visible_and_not_retried_forever(self):
         self.engine.tick("TAG_A", 1)
         with patch.object(self.player, "poll", side_effect=RuntimeError("ALSA unavailable")):
@@ -212,6 +211,26 @@ class EngineTests(unittest.TestCase):
         self.engine.tick("TAG_A", 1.6)
         self.assertIsNone(self.engine.track)
 
+
+
+class StoreImportTests(unittest.TestCase):
+    def test_library_json_is_imported_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            legacy = {"version": 1,
+                      "tracks": {"t1": {"title": "Song", "file": "t1.mp3", "original": "Song.mp3"}},
+                      "tags": {"AA": "t1", "BB": "gone"},
+                      "settings": {"volume": 70, "remove_delay": 1.2, "continue_playback": True}}
+            Path(root, "library.json").write_text(json.dumps(legacy), encoding="utf-8")
+            store = Store(root)
+            data = store.snapshot()
+            self.assertEqual(data["tracks"]["t1"]["title"], "Song")
+            self.assertEqual(data["tags"], {"AA": "t1"})  # BB pointed at a missing track
+            self.assertEqual(data["settings"], {"volume": 70, "read_grace_ms": 1000, "continue_playback": True})
+            store.db.close()
+            Path(root, "library.json").write_text(json.dumps({**legacy, "tracks": {}}), encoding="utf-8")
+            again = Store(root)  # the DB is not empty: no second import
+            self.assertEqual(again.snapshot()["tracks"].keys(), {"t1"})
+            again.db.close()
 
 
 class FakeChip:
@@ -352,37 +371,64 @@ class PlayerTests(unittest.TestCase):
 
 class HttpTests(unittest.TestCase):
     setUp = EngineTests.setUp
+    open_store = EngineTests.open_store
 
-    def test_no_auth_and_manual_controls(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_factory(self.engine))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        base = f"http://127.0.0.1:{server.server_port}"
-        try:
-            with urllib.request.urlopen(base + "/api/status") as response:
-                self.assertIn("tracks", json.load(response))
-            for route, payload in [("play", {"track": "a"}), ("stop", {})]:
-                req = urllib.request.Request(base + "/api/" + route,
-                    data=json.dumps(payload).encode(), headers={"X-Jukebox": "1"})
-                with urllib.request.urlopen(req) as response:
-                    self.assertTrue(json.load(response)["ok"])
-                self.assertEqual(self.engine.track, "a" if route == "play" else None)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
+    def client(self):
+        return TestClient(create_app(self.engine, static_dir=Path(self.temp.name) / "no-static"))
+
+    def test_status_and_manual_controls(self):
+        client = self.client()
+        self.assertIn("tracks", client.get("/api/status").json())
+        self.assertTrue(client.post("/api/play", json={"track": "a"}, headers=JUKEBOX).json()["ok"])
+        self.assertEqual(self.engine.track, "a")
+        self.assertTrue(client.post("/api/stop", headers=JUKEBOX).json()["ok"])
+        self.assertIsNone(self.engine.track)
+
+    def test_post_needs_jukebox_header(self):
+        response = self.client().post("/api/stop")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    def test_errors_are_json_with_message(self):
+        client = self.client()
+        missing = client.post("/api/play", json={"track": "nope"}, headers=JUKEBOX)
+        self.assertEqual((missing.status_code, missing.json()["error"]), (400, "Трек не найден"))
+        invalid = client.post("/api/settings", json={"volume": 500, "read_grace_ms": 10}, headers=JUKEBOX)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("volume", invalid.json()["error"])
+
+    def test_settings_persist(self):
+        body = {"volume": 60, "read_grace_ms": 1500, "continue_playback": True}
+        self.client().post("/api/settings", json=body, headers=JUKEBOX)
+        self.assertEqual(self.store.snapshot()["settings"], body)
+        self.assertIn(60, self.player.events)
 
     def test_upload_duplicate_and_path_safety(self):
+        client = self.client()
         with patch("server.subprocess.run") as probe:
             probe.return_value.stdout = '{"streams":[{"codec_name":"mp3"}]}'
-            one = upload(self.store, io.BytesIO(b"music"), 5, "../../test.mp3")
-            two = upload(self.store, io.BytesIO(b"music"), 5, "different.mp3")
+            one = client.post("/api/upload", params={"name": "../../test.mp3"}, content=b"music", headers=JUKEBOX).json()
+            two = client.post("/api/upload", params={"name": "different.mp3"}, content=b"music", headers=JUKEBOX).json()
         self.assertEqual(one["id"], two["id"])
         self.assertTrue(two["duplicate"])
         track = self.store.snapshot()["tracks"][one["id"]]
         self.assertEqual(track["title"], "test")
         self.assertTrue((self.store.root / "music" / track["file"]).exists())
+        self.assertEqual(list((self.store.root / "music").glob("*.part")), [])
 
+    def test_upload_rejects_unknown_extension(self):
+        response = self.client().post("/api/upload", params={"name": "x.exe"}, content=b"x", headers=JUKEBOX)
+        self.assertEqual(response.status_code, 400)
+
+    def test_legacy_ui_served_without_frontend_build(self):
+        response = self.client().get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.headers["content-type"])
+
+    def test_status_key_ignores_position(self):
+        status = self.engine.status()
+        self.assertEqual(status_key({**status, "position": 1.0}), status_key({**status, "position": 2.0}))
+        self.assertNotEqual(status_key(status), status_key({**status, "message": "other"}))
 
 if __name__ == "__main__":
     unittest.main()

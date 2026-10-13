@@ -26,9 +26,9 @@ echo "==> venv"
 if [ ! -x "$venv/bin/python" ]; then
     python3 -m venv "$venv"
 fi
-req_hash=$(sha256sum requirements.txt | cut -d' ' -f1)
+req_hash=$(cat requirements.txt requirements-dev.txt | sha256sum | cut -d' ' -f1)
 if [ "$(cat "$venv/.requirements.sha256" 2>/dev/null)" != "$req_hash" ]; then
-    "$venv/bin/pip" install -q -r requirements.txt
+    "$venv/bin/pip" install -q -r requirements.txt -r requirements-dev.txt
     echo "$req_hash" > "$venv/.requirements.sha256"
 else
     echo "    requirements unchanged"
@@ -94,7 +94,7 @@ switch_to() {
 healthy() {
     for _ in $(seq 1 20); do
         sleep 1
-        if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/status"; then
+        if curl -fs -o /dev/null "http://127.0.0.1:$PORT/api/status"; then
             return 0
         fi
     done

@@ -1,53 +1,136 @@
 import copy
 import json
 import logging
-import os
+import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+LOG = logging.getLogger("jukebox")
+
+DEFAULT_SETTINGS = {"volume": 35, "read_grace_ms": 1000, "continue_playback": False}
+
+# Index i holds the migration from schema version i to i + 1.
+MIGRATIONS = [
+    """
+    CREATE TABLE tracks (
+        id TEXT PRIMARY KEY,            -- sha256 of the file
+        title TEXT NOT NULL,
+        file TEXT NOT NULL,             -- name inside music/
+        original TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE tags (
+        uid TEXT PRIMARY KEY,
+        track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
+        label TEXT,
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL             -- JSON
+    );
+    """,
+]
 
 
 class Store:
+    """Library in SQLite (jukebox.db). Reads go through an in-memory snapshot."""
+
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "music").mkdir(exist_ok=True)
-        self.path = self.root / "library.json"
+        self.path = self.root / "jukebox.db"
         self.lock = threading.RLock()
-        self.data = {"version": 1, "tracks": {}, "tags": {},
-                     "settings": {"volume": 35, "read_grace_ms": 1000, "continue_playback": False}}
-        if self.path.exists():
-            self.data = json.loads(self.path.read_text(encoding="utf-8"))
-            if self.data.get("version") != 1:
-                raise ValueError("Unsupported library.json version")
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")  # survive the plug being pulled
+        self.db.execute("PRAGMA foreign_keys=ON")
+        self._cache = None
+        self._migrate()
+        self._import_json()
 
-        if "read_grace_ms" not in self.data["settings"]:
-            self.update(lambda d: d["settings"].update(read_grace_ms=1000))
-        if "continue_playback" not in self.data["settings"]:
-            self.update(lambda d: d["settings"].update(continue_playback=False))
+    @contextmanager
+    def _tx(self):
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield self.db
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+            self.db.execute("COMMIT")
+            self._cache = None
+
+    def _migrate(self):
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version > len(MIGRATIONS):
+            raise ValueError(f"jukebox.db schema {version} is newer than this code")
+        for target in range(version, len(MIGRATIONS)):
+            with self._tx() as db:
+                for statement in MIGRATIONS[target].split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                db.execute(f"PRAGMA user_version={target + 1}")
+            LOG.info("DB migrated to schema %s", target + 1)
+
+    def _import_json(self):
+        legacy = self.root / "library.json"
+        if not legacy.exists() or self.db.execute(
+                "SELECT 1 FROM settings UNION ALL SELECT 1 FROM tracks LIMIT 1").fetchone():
+            return
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+        if data.get("version") != 1:
+            raise ValueError("Unsupported library.json version")
+        now = time.time()
+        with self._tx() as db:
+            for track_id, track in data["tracks"].items():
+                db.execute("INSERT INTO tracks VALUES (?, ?, ?, ?, ?)",
+                           (track_id, track["title"], track["file"], track.get("original", ""), now))
+            for uid, track_id in data["tags"].items():
+                db.execute("INSERT INTO tags VALUES (?, ?, NULL, ?)",
+                           (uid, track_id if track_id in data["tracks"] else None, now))
+            settings = {**DEFAULT_SETTINGS,
+                        **{k: v for k, v in data["settings"].items() if k in DEFAULT_SETTINGS}}
+            for key, value in settings.items():
+                db.execute("INSERT INTO settings VALUES (?, ?)", (key, json.dumps(value)))
+        # library.json stays untouched so a rollback to a pre-SQLite release still finds it.
+        LOG.info("Imported library.json: %s tracks, %s tags", len(data["tracks"]), len(data["tags"]))
 
     def snapshot(self):
         with self.lock:
-            return copy.deepcopy(self.data)
+            if self._cache is None:
+                tracks = {row[0]: {"title": row[1], "file": row[2], "original": row[3]}
+                          for row in self.db.execute(
+                              "SELECT id, title, file, original FROM tracks ORDER BY title")}
+                tags = dict(self.db.execute(
+                    "SELECT uid, track_id FROM tags WHERE track_id IS NOT NULL ORDER BY uid"))
+                settings = {**DEFAULT_SETTINGS,
+                            **{k: json.loads(v) for k, v in self.db.execute("SELECT key, value FROM settings")}}
+                self._cache = {"version": 1, "tracks": tracks, "tags": tags, "settings": settings}
+            return copy.deepcopy(self._cache)
 
-    def update(self, change):
-        with self.lock:
-            updated = copy.deepcopy(self.data)
-            result = change(updated)
-            temp = self.path.with_suffix(".tmp")
-            with temp.open("w", encoding="utf-8") as stream:
-                json.dump(updated, stream, ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp, self.path)
-            directory = os.open(self.root, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-            self.data = updated
-            return result
+    def add_track(self, track_id, title, file, original):
+        with self._tx() as db:
+            db.execute("INSERT OR REPLACE INTO tracks VALUES (?, ?, ?, ?, ?)",
+                       (track_id, title, file, original, time.time()))
 
+    def bind_tag(self, uid, track_id):
+        with self._tx() as db:
+            db.execute("INSERT INTO tags VALUES (?, ?, NULL, ?) "
+                       "ON CONFLICT(uid) DO UPDATE SET track_id = excluded.track_id",
+                       (uid, track_id, time.time()))
+
+    def unbind_tag(self, uid):
+        with self._tx() as db:
+            db.execute("DELETE FROM tags WHERE uid = ?", (uid,))
+
+    def update_settings(self, **values):
+        with self._tx() as db:
+            for key, value in values.items():
+                db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
 
 class Engine:
     def __init__(self, store, player, clock=time.monotonic):
@@ -121,7 +204,7 @@ class Engine:
             self.message = "Убери все метки от считывателя"
 
     def save_binding(self, uid, track_id):
-        self.store.update(lambda d: d["tags"].__setitem__(uid, track_id))
+        self.store.bind_tag(uid, track_id)
         self.pending = None
         self.current = uid
         self.suppressed = uid
@@ -153,7 +236,7 @@ class Engine:
 
     def unbind(self, uid):
         with self.lock:
-            self.store.update(lambda d: d["tags"].pop(uid, None))
+            self.store.unbind_tag(uid)
             self._resume_positions.pop(uid, None)
             if self.current == uid:
                 self.stop()

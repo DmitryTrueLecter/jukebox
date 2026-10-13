@@ -16,19 +16,22 @@ Based on the Hack Club project https://codex.hackclub.com/project-blogs/jukebox/
 
 ## Files
 
-- `core.py`: `Store` holds `library.json` with atomic writes (tmp + fsync + os.replace + directory fsync). `Engine` is the playback/binding state machine; every method runs under `self.lock`
-- `server.py`: `ThreadingHTTPServer`, API, uploads, and `worker()`, the NFC polling loop (~150 ms) that calls `engine.tick(uid)`
+- `core.py`: `Store` is SQLite (`jukebox.db`, WAL, `synchronous=FULL`, foreign keys, schema migrations in `MIGRATIONS` tracked by `PRAGMA user_version`). Reads go through a cached `snapshot()` dict (`tracks`, `tags` uid→track, `settings`); writes are explicit methods (`add_track`, `bind_tag`, `unbind_tag`, `update_settings`) in `BEGIN IMMEDIATE` transactions. On first start it imports `library.json` and leaves the file in place for rollbacks. `Engine` is the playback/binding state machine; every method runs under `self.lock`
+- `server.py`: FastAPI app from `create_app(engine)`, run by uvicorn from `main()`. Pydantic models define the API (also the source of the TS types). `worker()` is the NFC polling thread (~150 ms) that calls `engine.tick(uid)`; it starts and stops in the app lifespan. Serves the built frontend from `static/` at `/` (falls back to the legacy `index.html`), the legacy UI at `/legacy`, API docs at `/docs`
 - `player.py`: `Player`. One long-lived `mpv --idle` process controlled over JSON IPC (Unix socket in the temp dir), output `--ao=alsa --audio-device=alsa/jukebox`. Decodes on the fly; `seek`, live `volume`, `time-pos`/`duration` come from mpv. `end-file` events are matched by `playlist_entry_id` so a replaced track's EOF is ignored. mpv is restarted lazily if it dies
 - `reader.py`: `Reader` on top of `mfrc522==0.0.7` (REQA → Anticoll → HALT). HALT goes out with the Transmit command (the library's Transceive would busy-poll ~10 ms for a reply that never comes); an empty reader gets one attempt per poll, a present tag up to 3. ~5 ms per read with a tag, ~13 ms without; the service idles at ~9% of one core
-- `index.html`: single-page UI, no build step, no dependencies. One-line JS, polls `/api/status` about once a second
-- `install.sh`: venv, apt packages, spi/gpio/audio groups, systemd unit `jukebox-manager.service`
-- `tests/test_jukebox.py`: unittest with `FakePlayer`, `FakeChip` and `tests/fake_mpv.py` (fake mpv IPC server; Player tests need Unix sockets, so they are skipped on Windows); no hardware needed
+- `index.html`: legacy single-page UI (one-line JS, polls `/api/status`). Kept at `/legacy` until the React UI reaches parity, then deleted
+- `frontend/`: React 19 + TypeScript 5 + Vite. `src/api/schema.d.ts` is generated (`npm run gen:api` → `scripts/dump_openapi.py`), never edited by hand; `src/api/client.ts` wraps it. `useStatus` subscribes to `/api/events`; `usePosition` extrapolates playback position between events. `npm run dev` proxies `/api` to the real Pi (`JUKEBOX_URL` overrides). TypeScript stays on 5.x: openapi-typescript needs the JS compiler API that TS 7 dropped
+- `install.sh`: one-time Pi preparation (apt packages incl. mpv/ffmpeg, spi/gpio/audio groups, data dir); everything else comes from deploy
+- `requirements.txt` (runtime: mfrc522, fastapi, uvicorn) and `requirements-dev.txt` (httpx2 for `fastapi.testclient`); both are installed on the Pi
+- `tests/test_jukebox.py`: unittest with `FakePlayer`, `FakeChip`, `TestClient` and `tests/fake_mpv.py` (fake mpv IPC server; Player tests need Unix sockets, so they are skipped on Windows); no hardware needed
 - `deploy/asound.conf`: ALSA device `jukebox` = plug → route ((L+R)/2 to both channels) → plug → `hw:CARD=MAX98357A`. Installed to `/etc/asound.conf` by deploy
 - `deploy/wireplumber-jukebox.conf`: disables the MAX98357A card in the desktop's WirePlumber so PipeWire never grabs it. Installed to `~/.config/wireplumber/wireplumber.conf.d/50-jukebox.conf`
 
 ## Data (`~/jukebox-data`)
 
-- `library.json`: `{"version": 1, "tracks": {sha256: {title, file, original}}, "tags": {uid: track_id}, "settings": {volume, read_grace_ms, continue_playback}}`
+- `jukebox.db` (+ `-wal`, `-shm`): tables `tracks(id sha256, title, file, original, created_at)`, `tags(uid, track_id → tracks ON DELETE SET NULL, label, created_at)`, `settings(key, value JSON)`. Back up with the service stopped, or with `sqlite3 jukebox.db ".backup copy.db"`
+- `library.json`: legacy store, imported once into an empty DB and otherwise unused
 - `music/`: originals stored as `<sha256>.<ext>`
 
 ## Engine logic
@@ -42,12 +45,14 @@ Based on the Hack Club project https://codex.hackclub.com/project-blogs/jukebox/
 ## API
 
 Every POST requires the `X-Jukebox: 1` header (CSRF guard). No authentication.
-`GET /api/status`. POST: `/api/play {track}`, `/api/stop`, `/api/seek {position}`, `/api/bind {track}`, `/api/confirm {uid, track}`, `/api/cancel`, `/api/unbind {uid}`, `/api/settings {volume, read_grace_ms, continue_playback}`, `/api/upload?name=...` (raw file bytes as body, up to 200 MB; mp3/flac/wav/ogg/m4a/aac/opus).
+`GET /api/status`, `GET /api/events` (SSE: full status on every change, at least every 5 s). POST: `/api/play {track}`, `/api/stop`, `/api/seek {position}`, `/api/bind {track}`, `/api/confirm {uid, track}`, `/api/cancel`, `/api/unbind {uid}`, `/api/settings {volume, read_grace_ms, continue_playback}`, `/api/upload?name=...` (raw file bytes as body, up to 200 MB; mp3/flac/wav/ogg/m4a/aac/opus).
 
 ## Commands
 
 ```bash
-python3 -m unittest discover -s tests -v   # run on the Pi or WSL: directory fsync fails on Windows
+python -m unittest discover -s tests -v   # from the repo root; works on Windows too (Player tests skipped)
+cd frontend && npm run dev                 # UI dev server against the real Pi
+cd frontend && npm run gen:api             # after changing API models in server.py
 python3 server.py --data ~/jukebox-data --port 8080
 journalctl -u jukebox-manager -n 80 --no-pager
 sudo systemctl restart jukebox-manager
@@ -68,7 +73,7 @@ sudo systemctl restart jukebox-manager
 ## Conventions
 
 - Language: everything is in English (code, comments, docs, logs, scripts) except text shown in the web UI, which is Russian. That includes `index.html` and the backend strings that reach the UI: `engine.message`, `ValueError` messages (returned as HTTP 400), `reader_error`, `audio_error`
-- Python standard library plus `mfrc522` only. Do not add dependencies without a good reason
+- Backend dependencies: `mfrc522`, `fastapi`, `uvicorn` (pinned). Do not add more without a good reason
 - Call external processes (mpv, ffprobe) with argument lists, never through a shell
 
 ## Known issues
