@@ -27,6 +27,10 @@ _PEAK = re.compile(r"True peak:\s*\n\s*Peak:\s+(-?[\d.]+|-inf) dBFS")
 _SILENCE = re.compile(r"silence_(start|end): (-?[\d.]+)")
 
 
+class Interrupted(Exception):
+    """ffmpeg was killed (service restart, SIGTERM from systemd): not the file's fault."""
+
+
 def _number(match):
     if match is None or match.group(1) == "-inf":
         return None
@@ -78,7 +82,7 @@ def analyze_file(path, ffmpeg="ffmpeg", on_process=None):
     reader.start()
     try:
         pcm = process.stdout.read()
-        if process.wait(timeout=TIMEOUT) != 0:
+        if process.wait(timeout=TIMEOUT) != 0 and process.returncode > 0 and process.returncode != 255:
             raise RuntimeError(f"ffmpeg завершился с кодом {process.returncode}")
     except subprocess.TimeoutExpired:
         process.kill()
@@ -86,6 +90,8 @@ def analyze_file(path, ffmpeg="ffmpeg", on_process=None):
     finally:
         reader.join(timeout=5)
     text = (log[0] if log else b"").decode("utf-8", "replace")
+    if process.returncode < 0 or "received signal" in text.lower():
+        raise Interrupted(f"ffmpeg interrupted (code {process.returncode})")
     duration = len(pcm) / 2 / SAMPLE_RATE
     if duration <= 0:
         raise RuntimeError("В файле не найдено аудио")
@@ -178,6 +184,7 @@ class Analyzer:
             track_id = self.queue.popleft()
             self.queued.discard(track_id)
             self.running = track_id
+        retry = False
         try:
             track = self.store.snapshot()["tracks"].get(track_id)
             if track is None:
@@ -186,9 +193,14 @@ class Analyzer:
             started = time.monotonic()
             try:
                 result = self.analyze(path, on_process=self._register)
+            except Interrupted as exc:
+                # systemd sends SIGTERM to ffmpeg and uvicorn at the same time, so this can arrive before stop()
+                LOG.info("Analysis interrupted track=%s: %s", track_id, exc)
+                retry = not self.stopping
+                return
             except Exception as exc:
                 if self.stopping:
-                    return  # killed by shutdown, not a bad file: it is picked up again at the next start
+                    return
                 LOG.warning("Analysis failed track=%s: %s", track_id, exc)
                 self.store.set_analysis_error(track_id, str(exc))
                 return
@@ -202,6 +214,8 @@ class Analyzer:
             with self.cond:
                 self.running = None
                 self.process = None
+            if retry:
+                self.enqueue([track_id])  # after `running` is cleared, or enqueue() would drop it as a duplicate
 
     def _register(self, process):
         with self.cond:

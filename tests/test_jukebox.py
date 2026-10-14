@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
-from analysis import Analyzer, parse_log, peaks_from_pcm
+from analysis import Analyzer, Interrupted, parse_log, peaks_from_pcm
 from core import Engine, Store, auto_gain
 from player import Player
 from reader import Reader, crc_a
@@ -372,6 +372,8 @@ class AnalysisTests(unittest.TestCase):
             seen.append(path.name)
             if "bad" in path.name:
                 raise RuntimeError("ffmpeg завершился с кодом 1")
+            if "b" == path.stem and not seen.count("b.mp3") > 1:
+                raise Interrupted("ffmpeg interrupted (code -15)")  # first attempt: killed, retried at the back
             return {"loudness_lufs": -20.0, "true_peak_db": -1.5, "duration": 30.0, "peaks": [0, 255],
                     "silence_start": 0.2, "silence_end": None}
 
@@ -392,6 +394,9 @@ class AnalysisTests(unittest.TestCase):
         analyzer.enqueue_all()
         self.assertEqual(analyzer.status()["queued"], 3)
         analyzer.run_pending()
+        self.assertEqual(seen.count("b.mp3"), 2)
+        self.assertIsNone(store.snapshot()["tracks"]["b"]["analysis_error"])
+        self.assertIsNotNone(store.snapshot()["tracks"]["b"]["analyzed_at"])
         analyzer.stopping = True  # a kill during shutdown must not be recorded as the file's fault
         store.set_analysis_error("bad", "")
         analyzer.enqueue(["bad"])
