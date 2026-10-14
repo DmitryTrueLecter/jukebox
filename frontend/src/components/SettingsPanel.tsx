@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Run, type Status } from "../api/client";
 
 interface Props {
@@ -13,6 +13,20 @@ export default function SettingsPanel({ status, volume, setVolume, run }: Props)
   const settings = status.settings;
   const [grace, setGrace] = useState(String(settings.read_grace_ms));
   useEffect(() => setGrace(String(settings.read_grace_ms)), [settings.read_grace_ms]);
+  const [localTarget, setLocalTarget] = useState<number | null>(null);
+  const targetTimer = useRef<number | undefined>(undefined);
+  const target = localTarget ?? settings.target_lufs;
+  const changeTarget = (value: number) => {
+    setLocalTarget(value);
+    window.clearTimeout(targetTimer.current);
+    targetTimer.current = window.setTimeout(() => {
+      run(() => api.settings({ ...settings, target_lufs: value }).then(() => setLocalTarget(null)));
+    }, 200);
+  };
+  const tracks = Object.values(status.tracks);
+  const total = tracks.length;
+  const analyzed = tracks.filter((t) => t.analyzed_at != null).length;
+  const missing = tracks.filter((t) => t.analyzed_at == null && !t.analysis_error).length;
 
   const saveGrace = () => {
     const value = Number(grace);
@@ -55,6 +69,40 @@ export default function SettingsPanel({ status, volume, setVolume, run }: Props)
         С диском трек запускается снова после окончания. Без диска кнопка «Плей» запускает его один раз.
         «Стоп» отменяет автоматический повтор, пока диск не вынут.
       </p>
+
+      <h2 className="sub">Громкость треков</h2>
+      <label className="field check">
+        <input
+          type="checkbox"
+          checked={settings.normalize}
+          onChange={(event) => run(() => api.settings({ ...settings, normalize: event.target.checked }))}
+        />
+        <span>Выравнивать громкость по анализу</span>
+      </label>
+      <label className="field">
+        <span>Целевая громкость: <b>{target} LUFS</b></span>
+        <input type="range" min={-24} max={-8} step={1} value={target} disabled={!settings.normalize}
+          onChange={(event) => changeTarget(Number(event.target.value))} />
+      </label>
+      <p className="muted small">
+        {analyzed} из {total} проанализировано
+        {status.analysis.running && <> · анализируется «{status.tracks[status.analysis.running]?.title ?? "…"}»</>}
+        {status.analysis.queued > 0 && <> · в очереди {status.analysis.queued}</>}
+      </p>
+      <div className="row">
+        {missing > 0 && (
+          <button onClick={() => run(() => api.analyze())}>Проанализировать недостающие ({missing})</button>
+        )}
+        <button
+          onClick={() => {
+            if (window.confirm("Заново проанализировать все треки? На Raspberry Pi это займёт несколько минут.")) {
+              run(() => api.analyze({ all: true }));
+            }
+          }}
+        >
+          Все заново
+        </button>
+      </div>
     </section>
   );
 }

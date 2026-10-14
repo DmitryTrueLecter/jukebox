@@ -10,7 +10,8 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
-from core import Engine, Store
+from analysis import Analyzer, parse_log, peaks_from_pcm
+from core import Engine, Store, auto_gain
 from player import Player
 from reader import Reader, crc_a
 from fastapi.testclient import TestClient
@@ -31,8 +32,9 @@ class FakePlayer:
     def stop(self):
         self.events.append("stop")
 
-    def play(self, path, offset=0.0):
+    def play(self, path, start=0.0, end=None, gain_db=0.0):
         self.events.append(Path(path).name)
+        self.last = {"start": start, "end": end, "gain_db": gain_db}
 
     def seek(self, position):
         self.events.append(("seek", position))
@@ -187,7 +189,8 @@ class EngineTests(unittest.TestCase):
 
     def test_default_settings(self):
         self.assertEqual(self.store.snapshot()["settings"],
-                         {"volume": 35, "read_grace_ms": 1000, "continue_playback": False})
+                         {"volume": 35, "read_grace_ms": 1000, "continue_playback": False,
+                          "normalize": True, "target_lufs": -16.0})
     def test_player_error_visible_and_not_retried_forever(self):
         self.engine.tick("TAG_A", 1)
         with patch.object(self.player, "poll", side_effect=RuntimeError("ALSA unavailable")):
@@ -261,6 +264,55 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.delete_track("a")
 
+    def test_gain_and_trim_reach_the_player_and_positions_are_relative(self):
+        self.engine.tick("TAG_A", 1)
+        self.assertEqual(self.player.last, {"start": 0.0, "end": None, "gain_db": 0.0})
+        self.store.set_analysis("a", loudness_lufs=-20.0, true_peak_db=-0.5, duration=100.0)
+        self.engine.set_sound("a", gain_offset_db=1.5, trim_start=10.0, trim_end=90.0)
+        self.engine.manual_play("a")
+        # target -16: +4 dB wanted, but the true peak caps the auto gain at -0.5 dB; plus the +1.5 offset
+        self.assertEqual(self.player.last, {"start": 10.0, "end": 90.0, "gain_db": 1.0})
+        self.assertEqual(self.engine.status()["tracks"]["a"]["gain_db"], -0.5)
+        self.player.position, self.player.duration = 25.0, 100.0
+        status = self.engine.status()
+        self.assertEqual((status["position"], status["duration"]), (15.0, 80.0))
+        self.engine.seek(30)
+        self.assertEqual(self.player.events[-1], ("seek", 40.0))
+        self.engine.seek(500)
+        self.assertEqual(self.player.events[-1], ("seek", 89.9))
+        self.store.update_settings(normalize=False)
+        self.engine.manual_play("a")
+        self.assertEqual(self.player.last["gain_db"], 1.5)
+        self.engine.manual_play("a", position=5)
+        self.assertEqual(self.player.events[-1], ("seek", 15.0))
+
+    def test_sound_validation(self):
+        self.store.set_analysis("a", -12.0, -1.0, 60.0)
+        for bad in (dict(gain_offset_db=25), dict(trim_start=59.8), dict(trim_start=10, trim_end=10.2)):
+            with self.assertRaises(ValueError):
+                self.engine.set_sound("a", **bad)
+        self.engine.set_sound("a", trim_end=59.99)  # trimming nothing at the end = no trim
+        self.assertIsNone(self.store.snapshot()["tracks"]["a"]["trim_end"])
+        self.engine.set_sound("a", trim_start=0, trim_end=30)
+        self.assertEqual(self.store.snapshot()["tracks"]["a"]["trim_start"], None)
+        self.engine.set_sound("a", clear_trim=True)
+        self.assertEqual(self.store.snapshot()["tracks"]["a"]["trim_end"], None)
+        self.assertEqual(auto_gain({"loudness_lufs": -30.0, "true_peak_db": -20.0}, {"normalize": True, "target_lufs": -16}), 14.0)
+        self.assertEqual(auto_gain({"loudness_lufs": None}, {"normalize": True, "target_lufs": -16}), 0.0)
+
+    def test_resume_respects_trim(self):
+        self.store.update_settings(continue_playback=True)
+        self.engine.set_sound("a", trim_start=20.0, trim_end=80.0)
+        self.engine.tick("TAG_A", 1)
+        self.player.elapsed = 50.0
+        self.engine.tick(None, 3)
+        self.engine.tick("TAG_A", 4)
+        self.assertEqual(self.player.last["start"], 50.0)
+        self.player.elapsed = 79.5  # saved position past the trimmed end: start over
+        self.engine.tick(None, 6)
+        self.engine.tick("TAG_A", 7)
+        self.assertEqual(self.player.last["start"], 20.0)
+
     def test_delete_track_cancels_its_binding_and_resume(self):
         self.store.update_settings(continue_playback=True)
         self.engine.tick("TAG_A", 1)
@@ -271,6 +323,75 @@ class EngineTests(unittest.TestCase):
         self.engine.delete_track("a")
         self.assertIsNone(self.engine.pending)
         self.assertEqual(self.engine._resume_positions, {})
+
+
+class AnalysisTests(unittest.TestCase):
+    LOG = """[silencedetect @ 0x1] silence_start: 0
+[silencedetect @ 0x1] silence_end: 0.35 | silence_duration: 0.35
+[silencedetect @ 0x1] silence_start: 86.75
+[Parsed_ebur128_0 @ 0x2] Summary:
+
+  Integrated loudness:
+    I:         -17.1 LUFS
+    Threshold: -27.9 LUFS
+
+  Loudness range:
+    LRA:         9.8 LU
+
+  True peak:
+    Peak:       -0.4 dBFS
+"""
+
+    def test_parse_log(self):
+        result = parse_log(self.LOG, 89.0)
+        self.assertEqual(result, {"loudness_lufs": -17.1, "true_peak_db": -0.4, "silence_start": 0.35, "silence_end": 86.75})
+        silent = parse_log("I: -inf LUFS\nsilence_start: 0\n", 10.0)
+        self.assertEqual((silent["loudness_lufs"], silent["silence_start"], silent["silence_end"]), (None, None, None))
+        middle = parse_log("silence_start: 40\nsilence_end: 42 | silence_duration: 2\n", 89.0)
+        self.assertEqual((middle["silence_start"], middle["silence_end"]), (None, None))
+
+    def test_peaks(self):
+        samples = [0] * 50 + [1000] * 50 + [-2000] * 50 + [500] * 50
+        pcm = b"".join(int(s).to_bytes(2, "little", signed=True) for s in samples)
+        self.assertEqual(peaks_from_pcm(pcm, buckets=4), [0, 128, 255, 64])
+        self.assertEqual(peaks_from_pcm(b"", buckets=4), [])
+
+    def test_queue_stores_results_and_errors(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store = Store(temp.name)
+        self.addCleanup(store.db.close)
+        for name in ("a", "b", "bad"):
+            (store.root / "music" / (name + ".mp3")).write_bytes(b"x")
+            store.add_track(name, name, name + ".mp3", name)
+        seen = []
+
+        def fake_analyze(path, on_process=None):
+            seen.append(path.name)
+            if "bad" in path.name:
+                raise RuntimeError("ffmpeg завершился с кодом 1")
+            return {"loudness_lufs": -20.0, "true_peak_db": -1.5, "duration": 30.0, "peaks": [0, 255],
+                    "silence_start": 0.2, "silence_end": None}
+
+        analyzer = Analyzer(store, analyze=fake_analyze)
+        analyzer.enqueue_missing()
+        analyzer.enqueue(["a"])  # already queued: no duplicate
+        self.assertEqual(analyzer.status(), {"queued": 3, "running": None})
+        analyzer.discard("b")
+        analyzer.run_pending()
+        self.assertEqual(seen, ["a.mp3", "bad.mp3"])
+        track = store.snapshot()["tracks"]["a"]
+        self.assertEqual((track["loudness_lufs"], track["true_peak_db"], track["duration"]), (-20.0, -1.5, 30.0))
+        self.assertIsNotNone(track["analyzed_at"])
+        self.assertEqual(json.loads(store.analysis_path("a").read_text())["peaks"], [0, 255])
+        self.assertIn("ffmpeg", store.snapshot()["tracks"]["bad"]["analysis_error"])
+        analyzer.enqueue_missing()  # "bad" failed and is not retried automatically; "b" is still missing
+        self.assertEqual(analyzer.status()["queued"], 1)
+        analyzer.enqueue_all()
+        self.assertEqual(analyzer.status()["queued"], 3)
+        analyzer.run_pending()
+        store.delete_track("a")
+        self.assertFalse(store.analysis_path("a").exists())
 
 
 class StoreImportTests(unittest.TestCase):
@@ -285,7 +406,8 @@ class StoreImportTests(unittest.TestCase):
             data = store.snapshot()
             self.assertEqual(data["tracks"]["t1"]["title"], "Song")
             self.assertEqual(data["tags"], {"AA": {"track": "t1", "label": None}})  # BB pointed at a missing track
-            self.assertEqual(data["settings"], {"volume": 70, "read_grace_ms": 1000, "continue_playback": True})
+            self.assertEqual(data["settings"], {"volume": 70, "read_grace_ms": 1000, "continue_playback": True,
+                                                "normalize": True, "target_lufs": -16.0})
             store.db.close()
             Path(root, "library.json").write_text(json.dumps({**legacy, "tracks": {}}), encoding="utf-8")
             again = Store(root)  # the DB is not empty: no second import
@@ -460,7 +582,9 @@ class HttpTests(unittest.TestCase):
     def test_settings_persist(self):
         body = {"volume": 60, "read_grace_ms": 1500, "continue_playback": True}
         self.client().post("/api/settings", json=body, headers=JUKEBOX)
-        self.assertEqual(self.store.snapshot()["settings"], body)
+        saved = self.store.snapshot()["settings"]
+        self.assertEqual({k: saved[k] for k in body}, body)
+        self.assertEqual(saved["target_lufs"], -16.0)  # fields an older client leaves out keep their defaults
         self.assertIn(60, self.player.events)
 
     def test_upload_duplicate_and_path_safety(self):
@@ -487,6 +611,35 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(client.get("/api/status").json()["tags"]["TAG_A"], {"track": "a", "label": "диск"})
         self.assertEqual(client.put("/api/tags/TAG_A", json={"label": "диск"}).status_code, 403)
         self.assertEqual(client.put("/api/tags/TAG_A", json={"label": "x" * 81}, headers=JUKEBOX).status_code, 400)
+
+    def test_sound_update_analyze_and_waveform(self):
+        analyzer = Analyzer(self.store, analyze=lambda path, on_process=None: {
+            "loudness_lufs": -10.0, "true_peak_db": -3.0, "duration": 120.0, "peaks": [1, 2, 3],
+            "silence_start": None, "silence_end": 118.0})
+        self.engine.analyzer = analyzer
+        client = self.client()
+        self.assertEqual(client.get("/api/status").json()["analysis"], {"queued": 0, "running": None})
+        self.assertEqual(client.get("/api/tracks/a/waveform").status_code, 404)
+        self.assertEqual(client.post("/api/analyze", json={}, headers=JUKEBOX).status_code, 200)
+        self.assertEqual(client.get("/api/status").json()["analysis"]["queued"], 2)
+        analyzer.run_pending()
+        wave = client.get("/api/tracks/a/waveform").json()
+        self.assertEqual((wave["peaks"], wave["silence_end"]), ([1, 2, 3], 118.0))
+        track = client.get("/api/status").json()["tracks"]["a"]
+        self.assertEqual((track["loudness_lufs"], track["gain_db"]), (-10.0, -6.0))  # -16 target; peak cap (+2) not reached
+        self.assertEqual(client.put("/api/tracks/a", json={"gain_offset_db": -2.5, "trim_start": 1.5, "trim_end": 118.0},
+                                    headers=JUKEBOX).status_code, 200)
+        track = client.get("/api/status").json()["tracks"]["a"]
+        self.assertEqual((track["gain_offset_db"], track["trim_start"], track["trim_end"]), (-2.5, 1.5, 118.0))
+        self.assertEqual(client.put("/api/tracks/a", json={"trim_start": None, "trim_end": None}, headers=JUKEBOX).status_code, 200)
+        self.assertIsNone(client.get("/api/status").json()["tracks"]["a"]["trim_start"])
+        self.assertEqual(client.put("/api/tracks/a", json={"gain_offset_db": 99}, headers=JUKEBOX).status_code, 400)
+        self.assertEqual(client.post("/api/analyze", json={"track": "nope"}, headers=JUKEBOX).status_code, 400)
+        self.assertEqual(client.post("/api/play", json={"track": "a", "position": 7}, headers=JUKEBOX).status_code, 200)
+        self.assertEqual(self.player.events[-1], ("seek", 7.0))  # trim was cleared above
+        body = {"volume": 60, "read_grace_ms": 1500, "continue_playback": True, "normalize": False, "target_lufs": -14}
+        client.post("/api/settings", json=body, headers=JUKEBOX)
+        self.assertEqual(self.store.snapshot()["settings"]["target_lufs"], -14)
 
     def test_rename_and_delete_track(self):
         client = self.client()

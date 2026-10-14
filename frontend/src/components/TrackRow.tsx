@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { api, type Run, type Status, type Track } from "../api/client";
+import { formatTime } from "../format";
 import type { Playback } from "../useStatus";
 import InlineEdit from "./InlineEdit";
 import SeekBar from "./SeekBar";
+import SoundEditor from "./SoundEditor";
 
 interface Props {
   id: string;
@@ -15,7 +17,9 @@ interface Props {
 
 export default function TrackRow({ id, track, tags, status, playback, run }: Props) {
   const [editing, setEditing] = useState<"title" | string | null>(null); // "title" or a tag uid
+  const [sound, setSound] = useState(false);
   const playing = status.playing_track === id;
+  const analyzing = status.analysis.running === id;
   const busy = Boolean(status.pending);
 
   const remove = () => {
@@ -51,6 +55,11 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           ) : (
             <div className="track-title" onDoubleClick={() => setEditing("title")} title="Двойной клик — переименовать">
               {track.title}
+              {analyzing && <span className="badge">анализ…</span>}
+              {track.analysis_error && <span className="badge bad" title={track.analysis_error}>ошибка анализа</span>}
+              {track.duration != null && (
+                <span className="muted small duration">{formatTime((track.trim_end ?? track.duration) - (track.trim_start ?? 0))}</span>
+              )}
             </div>
           )}
           <div className="tags">
@@ -86,6 +95,7 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           </div>
         </div>
         <div className="track-actions">
+          <button className={`icon ${sound ? "on" : ""}`} onClick={() => setSound(!sound)} title="Звук: громкость и обрезка">🎚</button>
           <button className="icon" onClick={() => setEditing("title")} title="Переименовать">✎</button>
           <button className="icon danger" onClick={remove} title="Удалить трек">🗑</button>
         </div>
@@ -95,6 +105,7 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           <SeekBar position={playback.position} duration={playback.duration} onSeek={(p) => run(() => playback.seek(p))} />
         </div>
       )}
+      {sound && <SoundEditor id={id} track={track} status={status} playback={playback} run={run} />}
     </li>
   );
 }

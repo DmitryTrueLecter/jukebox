@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from analysis import Analyzer
 from core import Engine, Store
 
 LOG = logging.getLogger("jukebox")
@@ -70,6 +71,17 @@ class Track(BaseModel):
     file: str
     original: str
     created_at: float
+    # analysis (None until the background queue has processed the file)
+    loudness_lufs: Optional[float]
+    true_peak_db: Optional[float]
+    duration: Optional[float]
+    analyzed_at: Optional[float]
+    analysis_error: Optional[str]
+    gain_db: float = 0.0  # automatic normalization gain for the current settings; computed, not stored
+    # user adjustments
+    gain_offset_db: float = 0.0
+    trim_start: Optional[float]
+    trim_end: Optional[float]
 
 
 class Tag(BaseModel):
@@ -82,6 +94,13 @@ class Settings(BaseModel):
     volume: int = Field(ge=0, le=100)
     read_grace_ms: int = Field(ge=1, le=60000)
     continue_playback: bool = False
+    normalize: bool = True
+    target_lufs: float = Field(default=-16.0, ge=-30, le=-5)
+
+
+class Analysis(BaseModel):
+    queued: int
+    running: Optional[str]
 
 
 class Pending(BaseModel):
@@ -109,10 +128,29 @@ class Status(BaseModel):
     audio_error: Optional[str]
     position: Optional[float]
     duration: Optional[float]
+    analysis: Analysis
 
 
 class TrackRef(BaseModel):
     track: str
+
+
+class Play(BaseModel):
+    track: str
+    position: Optional[float] = Field(default=None, ge=0)
+
+
+class AnalyzeRequest(BaseModel):
+    """No fields: analyze what is missing. `track`: re-run that one. `all`: re-run the whole library."""
+    track: Optional[str] = None
+    all: bool = False
+
+
+class Waveform(BaseModel):
+    duration: float
+    peaks: list[int]
+    silence_start: Optional[float]
+    silence_end: Optional[float]
 
 
 class TagRef(BaseModel):
@@ -132,8 +170,12 @@ class Label(BaseModel):
     label: str = Field(max_length=80)
 
 
-class Title(BaseModel):
-    title: str = Field(max_length=240)
+class TrackUpdate(BaseModel):
+    """Fields left out are not changed; trim_start/trim_end set to null together clear the trim."""
+    title: Optional[str] = Field(default=None, max_length=240)
+    gain_offset_db: Optional[float] = None
+    trim_start: Optional[float] = None
+    trim_end: Optional[float] = None
 
 
 class Ok(BaseModel):
@@ -211,8 +253,8 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     @post.post("/play", response_model=Ok)
-    def play(body: TrackRef):
-        engine.manual_play(body.track)
+    def play(body: Play):
+        engine.manual_play(body.track, body.position)
         return Ok()
 
     @post.post("/stop", response_model=Ok)
@@ -251,12 +293,42 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
         return Ok()
 
     @post.put("/tracks/{track_id}", response_model=Ok)
-    def rename_track(track_id: str, body: Title):
-        engine.rename(track_id, body.title)
+    def update_track(track_id: str, body: TrackUpdate):
+        given = body.model_fields_set
+        if "title" in given:
+            engine.rename(track_id, body.title or "")
+        sound = {k: getattr(body, k) for k in ("gain_offset_db", "trim_start", "trim_end") if k in given}
+        if sound:
+            clear = "trim_start" in given and "trim_end" in given and body.trim_start is None and body.trim_end is None
+            engine.set_sound(track_id, gain_offset_db=sound.get("gain_offset_db"), trim_start=sound.get("trim_start"),
+                             trim_end=sound.get("trim_end"), clear_trim=clear)
+        return Ok()
+
+    @api.get("/tracks/{track_id}/waveform", response_model=Waveform)
+    def waveform(track_id: str):
+        path = engine.store.analysis_path(track_id)
+        if track_id not in engine.store.snapshot()["tracks"] or not path.is_file():
+            raise HTTPException(404, "Трек ещё не проанализирован")
+        return json.loads(path.read_text())
+
+    @post.post("/analyze", response_model=Ok)
+    def analyze(body: AnalyzeRequest):
+        if engine.analyzer is None:
+            raise ValueError("Анализ недоступен")
+        if body.track:
+            if body.track not in engine.store.snapshot()["tracks"]:
+                raise ValueError("Трек не найден")
+            engine.analyzer.enqueue([body.track], front=True)
+        elif body.all:
+            engine.analyzer.enqueue_all()
+        else:
+            engine.analyzer.enqueue_missing()
         return Ok()
 
     @post.delete("/tracks/{track_id}", response_model=Ok)
     def delete_track(track_id: str):
+        if engine.analyzer:
+            engine.analyzer.discard(track_id)
         engine.delete_track(track_id)
         return Ok()
 
@@ -292,7 +364,10 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
         except BaseException:
             temp.unlink(missing_ok=True)
             raise
-        return await run_in_threadpool(register_upload, store, temp, digest.hexdigest(), name)
+        result = await run_in_threadpool(register_upload, store, temp, digest.hexdigest(), name)
+        if engine.analyzer and store.snapshot()["tracks"][result["id"]]["analyzed_at"] is None:
+            engine.analyzer.enqueue([result["id"]])
+        return result
 
     app.include_router(api)
     app.include_router(post)
@@ -360,7 +435,8 @@ def main():
     store = Store(args.data)
     from player import Player
     player = Player(store.snapshot()["settings"]["volume"])
-    engine = Engine(store, player)
+    analyzer = Analyzer(store)
+    engine = Engine(store, player, analyzer=analyzer)
     stopping = threading.Event()
     try:
         from reader import Reader
@@ -373,9 +449,12 @@ def main():
     @asynccontextmanager
     async def lifespan(app):
         thread.start()
+        analyzer.enqueue_missing()
+        analyzer.start()
         LOG.info("Web interface on port %s", args.port)
         yield
         stopping.set()
+        analyzer.stop()
         thread.join(timeout=5)
         engine.player.close()
         if reader:

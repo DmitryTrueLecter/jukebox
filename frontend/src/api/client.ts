@@ -6,6 +6,8 @@ export type Track = components["schemas"]["Track"];
 export type Tag = components["schemas"]["Tag"];
 export type Pending = components["schemas"]["Pending"];
 export type Uploaded = components["schemas"]["Uploaded"];
+export type Waveform = components["schemas"]["Waveform"];
+export type TrackUpdate = components["schemas"]["TrackUpdate"];
 
 export class ApiError extends Error {}
 
@@ -21,7 +23,7 @@ function parseError(data: unknown, status: number) {
 export async function request<T = { ok: boolean }>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api/${path}`, {
     method,
-    headers: { "Content-Type": "application/json", "X-Jukebox": "1" },
+    headers: method === "GET" ? {} : { "Content-Type": "application/json", "X-Jukebox": "1" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json().catch(() => null);
@@ -55,7 +57,7 @@ export function upload(file: File, onProgress: (fraction: number) => void): Prom
 }
 
 export const api = {
-  play: (track: string) => request("POST", "play", { track }),
+  play: (track: string, position?: number) => request("POST", "play", { track, position }),
   stop: () => request("POST", "stop"),
   seek: (position: number) => request("POST", "seek", { position }),
   bind: (track: string) => request("POST", "bind", { track }),
@@ -65,6 +67,9 @@ export const api = {
   settings: (settings: Settings) => request("POST", "settings", settings),
   setLabel: (uid: string, label: string) => request("PUT", `tags/${encodeURIComponent(uid)}`, { label }),
   rename: (track: string, title: string) => request("PUT", `tracks/${encodeURIComponent(track)}`, { title }),
+  updateTrack: (track: string, fields: TrackUpdate) => request("PUT", `tracks/${encodeURIComponent(track)}`, fields),
+  waveform: (track: string) => request<Waveform>("GET", `tracks/${encodeURIComponent(track)}/waveform`),
+  analyze: (what: { track?: string; all?: boolean } = {}) => request("POST", "analyze", what),
   deleteTrack: (track: string) => request("DELETE", `tracks/${encodeURIComponent(track)}`),
   upload,
 };

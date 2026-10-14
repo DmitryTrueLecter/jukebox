@@ -131,13 +131,18 @@ class Player:
         with self.lock:
             return self._get("duration")
 
-    def play(self, path, offset=0.0):
+    def play(self, path, start=0.0, end=None, gain_db=0.0):
+        """Start the file at `start` seconds, stop at `end` (None = EOF), with `gain_db` applied by an audio filter."""
         with self.lock:
             self.stop()
-            options = f"start={offset:.3f}" if offset > 0 else ""
-            result = self._command("loadfile", str(path), "replace", -1, options)
+            options = [f"start={start:.3f}"] if start > 0 else []
+            if end is not None:
+                options.append(f"end={end:.3f}")
+            # The filter chain is a global property, so it is set before every load (and cleared when not needed).
+            self._command("set_property", "af", f"lavfi=[volume={gain_db:.2f}dB]" if abs(gain_db) >= 0.05 else "")
+            result = self._command("loadfile", str(path), "replace", -1, ",".join(options))
             self.entry = result["playlist_entry_id"]
-            LOG.info("PLAY %s volume=%s offset=%.1f", path, self.level, offset)
+            LOG.info("PLAY %s volume=%s start=%.1f end=%s gain=%.1f", path, self.level, start, end, gain_db)
 
     def seek(self, position):
         with self.lock:

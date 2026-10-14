@@ -39,7 +39,9 @@ Decided during phase 2:
 - Labelled discs without a track are listed under the tracks ("Диски без трека"); an empty label forgets the disc.
 - A seek does not push an SSE event; the client extrapolates from the seek target until the next event.
 
-## Phase 3: per-track sound
+## Phase 3: per-track sound (done 2026-10-14)
+
+Implemented as planned with two deviations: the auto gain is computed at play time from `loudness_lufs`/`true_peak_db` and the current `target_lufs` (no stored `gain_db` column, so changing the target needs no re-analysis), and the user explicitly wanted the queue to cover the existing library, not just uploads: it runs for every unanalyzed track at startup and the UI has "analyze missing" / "re-analyze all" / per-track re-run. No fade-in.
 
 Background analysis queue: one worker at `nice 19`, so playback is never affected. It runs on upload and once for the existing library.
 - ffmpeg `ebur128`/`loudnorm` analysis: integrated LUFS and true peak.

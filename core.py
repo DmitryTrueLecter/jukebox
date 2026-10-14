@@ -9,7 +9,11 @@ from pathlib import Path
 
 LOG = logging.getLogger("jukebox")
 
-DEFAULT_SETTINGS = {"volume": 35, "read_grace_ms": 1000, "continue_playback": False}
+DEFAULT_SETTINGS = {"volume": 35, "read_grace_ms": 1000, "continue_playback": False,
+                    "normalize": True, "target_lufs": -16.0}
+GAIN_LIMITS = (-30.0, 20.0)    # total gain applied by mpv, dB
+OFFSET_LIMITS = (-20.0, 20.0)  # manual per-track offset, dB
+MIN_TRIM_LENGTH = 0.5          # seconds that must remain between trim_start and trim_end
 
 # Index i holds the migration from schema version i to i + 1.
 MIGRATIONS = [
@@ -32,7 +36,21 @@ MIGRATIONS = [
         value TEXT NOT NULL             -- JSON
     );
     """,
+    # Per-track sound (phase 3): analysis results and the user's adjustments.
+    """
+    ALTER TABLE tracks ADD COLUMN loudness_lufs REAL;
+    ALTER TABLE tracks ADD COLUMN true_peak_db REAL;
+    ALTER TABLE tracks ADD COLUMN duration REAL;
+    ALTER TABLE tracks ADD COLUMN analyzed_at REAL;
+    ALTER TABLE tracks ADD COLUMN analysis_error TEXT;
+    ALTER TABLE tracks ADD COLUMN gain_offset_db REAL NOT NULL DEFAULT 0;
+    ALTER TABLE tracks ADD COLUMN trim_start REAL;
+    ALTER TABLE tracks ADD COLUMN trim_end REAL;
+    """,
 ]
+
+TRACK_COLUMNS = ("id", "title", "file", "original", "created_at", "loudness_lufs", "true_peak_db", "duration",
+                 "analyzed_at", "analysis_error", "gain_offset_db", "trim_start", "trim_end")
 
 
 class Store:
@@ -42,6 +60,7 @@ class Store:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "music").mkdir(exist_ok=True)
+        (self.root / "analysis").mkdir(exist_ok=True)
         self.path = self.root / "jukebox.db"
         self.lock = threading.RLock()
         self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
@@ -87,7 +106,7 @@ class Store:
         now = time.time()
         with self._tx() as db:
             for track_id, track in data["tracks"].items():
-                db.execute("INSERT INTO tracks VALUES (?, ?, ?, ?, ?)",
+                db.execute("INSERT INTO tracks (id, title, file, original, created_at) VALUES (?, ?, ?, ?, ?)",
                            (track_id, track["title"], track["file"], track.get("original", ""), now))
             for uid, track_id in data["tags"].items():
                 if track_id in data["tracks"]:  # an unlabelled tag without a track has nothing to keep
@@ -106,9 +125,9 @@ class Store:
         """
         with self.lock:
             if self._cache is None:
-                tracks = {row[0]: {"title": row[1], "file": row[2], "original": row[3], "created_at": row[4]}
+                tracks = {row[0]: dict(zip(TRACK_COLUMNS[1:], row[1:]))
                           for row in self.db.execute(
-                              "SELECT id, title, file, original, created_at FROM tracks ORDER BY title")}
+                              "SELECT " + ", ".join(TRACK_COLUMNS) + " FROM tracks ORDER BY title")}
                 tags = {row[0]: {"track": row[1], "label": row[2]}
                         for row in self.db.execute("SELECT uid, track_id, label FROM tags ORDER BY uid")}
                 settings = {**DEFAULT_SETTINGS,
@@ -118,8 +137,30 @@ class Store:
 
     def add_track(self, track_id, title, file, original):
         with self._tx() as db:
-            db.execute("INSERT OR REPLACE INTO tracks VALUES (?, ?, ?, ?, ?)",
+            db.execute("INSERT OR REPLACE INTO tracks (id, title, file, original, created_at) VALUES (?, ?, ?, ?, ?)",
                        (track_id, title, file, original, time.time()))
+
+    def analysis_path(self, track_id):
+        return self.root / "analysis" / (track_id + ".json")
+
+    def set_analysis(self, track_id, loudness_lufs, true_peak_db, duration):
+        with self._tx() as db:
+            db.execute("UPDATE tracks SET loudness_lufs = ?, true_peak_db = ?, duration = ?, analyzed_at = ?, "
+                       "analysis_error = NULL WHERE id = ?",
+                       (loudness_lufs, true_peak_db, duration, time.time(), track_id))
+
+    def set_analysis_error(self, track_id, message):
+        with self._tx() as db:
+            db.execute("UPDATE tracks SET analysis_error = ? WHERE id = ?", (message[:500], track_id))
+
+    def set_sound(self, track_id, **values):
+        """gain_offset_db / trim_start / trim_end; only the keys given are changed."""
+        unknown = set(values) - {"gain_offset_db", "trim_start", "trim_end"}
+        if unknown:
+            raise ValueError(f"unknown sound fields: {unknown}")
+        with self._tx() as db:
+            for key, value in values.items():
+                db.execute(f"UPDATE tracks SET {key} = ? WHERE id = ?", (value, track_id))
 
     def rename_track(self, track_id, title):
         with self._tx() as db:
@@ -133,6 +174,7 @@ class Store:
                 raise ValueError("Трек не найден")
             db.execute("DELETE FROM tracks WHERE id = ?", (track_id,))  # tags.track_id -> NULL
             db.execute("DELETE FROM tags WHERE track_id IS NULL AND label IS NULL")
+        self.analysis_path(track_id).unlink(missing_ok=True)
         return row[0]
 
     def bind_tag(self, uid, track_id):
@@ -173,9 +215,27 @@ def tag_name(data, uid):
     return (tag and tag["label"]) or uid
 
 
+def auto_gain(track, settings):
+    """Loudness normalization in dB: reach target_lufs, but keep the true peak under -1 dBTP."""
+    if not settings.get("normalize") or track.get("loudness_lufs") is None:
+        return 0.0
+    gain = settings["target_lufs"] - track["loudness_lufs"]
+    if track.get("true_peak_db") is not None:
+        gain = min(gain, -1.0 - track["true_peak_db"])
+    return round(gain, 2)
+
+
+def sound_params(track, settings):
+    """(gain_db, trim_start, trim_end) that mpv gets for this track."""
+    gain = auto_gain(track, settings) + (track.get("gain_offset_db") or 0.0)
+    gain = round(min(max(gain, GAIN_LIMITS[0]), GAIN_LIMITS[1]), 2)
+    return gain, track.get("trim_start") or 0.0, track.get("trim_end")
+
+
 class Engine:
-    def __init__(self, store, player, clock=time.monotonic):
+    def __init__(self, store, player, clock=time.monotonic, analyzer=None):
         self.store, self.player, self.clock = store, player, clock
+        self.analyzer = analyzer  # optional; the server passes the background Analyzer
         self.lock = threading.RLock()
         self.current = None
         self.track = None
@@ -202,21 +262,25 @@ class Engine:
         path = self.store.root / "music" / track["file"]
         if not path.is_file():
             raise ValueError("Файл трека отсутствует")
-        offset = 0.0
+        gain, trim_start, trim_end = sound_params(track, data["settings"])
+        offset = trim_start
         if source == "tag" and data["settings"].get("continue_playback"):
             saved = self._resume_positions.get(self.current)
             if saved and saved[0] == track_id:
-                offset = saved[1]
                 self._resume_positions.pop(self.current, None)
-        self.player.play(path, offset=offset)
+                if saved[1] > trim_start and (trim_end is None or saved[1] < trim_end - 1):
+                    offset = saved[1]
+        self.player.play(path, start=offset, end=trim_end, gain_db=gain)
         self.track, self.source = track_id, source
         if source == "tag":
             self.last_seen = max(self.last_seen, self.clock())
         self.audio_error = None
         self.message = "Воспроизведение: " + track["title"]
-        logging.info("PLAY track=%s source=%s tag=%s offset=%.1f", track_id, source, self.current, offset)
+        logging.info("PLAY track=%s source=%s tag=%s offset=%.1f gain=%.1f end=%s",
+                     track_id, source, self.current, offset, gain, trim_end)
 
-    def manual_play(self, track_id):
+    def manual_play(self, track_id, position=None):
+        """Play from the button; `position` (seconds inside the trimmed range) starts there, e.g. to audition a trim."""
         with self.lock:
             if self.pending:
                 raise ValueError("Сначала заверши или отмени привязку")
@@ -226,6 +290,8 @@ class Engine:
             if source == "tag":
                 self.suppressed = None
             self.start(track_id, source)
+            if position:
+                self.seek(position)
 
     def manual_stop(self):
         with self.lock:
@@ -270,11 +336,54 @@ class Engine:
             self.last_seen = self.clock()
             self.message = "Привязка отменена. Вынь и вставь диск для запуска."
 
+    def _current_range(self, data=None):
+        """(trim_start, trim_end) of the playing track; positions in the API are relative to trim_start."""
+        data = data or self.store.snapshot()
+        track = data["tracks"].get(self.track) if self.track else None
+        if not track:
+            return 0.0, None
+        return track["trim_start"] or 0.0, track["trim_end"]
+
     def seek(self, position):
         with self.lock:
             if self.track is None:
                 raise ValueError("Ничего не воспроизводится")
-            self.player.seek(max(0.0, position))
+            start, end = self._current_range()
+            absolute = start + max(0.0, position)
+            if end is not None:
+                absolute = min(absolute, end - 0.1)
+            self.player.seek(absolute)
+
+    def set_sound(self, track_id, gain_offset_db=None, trim_start=None, trim_end=None, clear_trim=False):
+        """Per-track adjustments. Applied on the next start; a playing track keeps its current settings."""
+        with self.lock:
+            track = self.store.snapshot()["tracks"].get(track_id)
+            if track is None:
+                raise ValueError("Трек не найден")
+            values = {}
+            if gain_offset_db is not None:
+                if not OFFSET_LIMITS[0] <= gain_offset_db <= OFFSET_LIMITS[1]:
+                    raise ValueError("Поправка громкости: от %+.0f до %+.0f дБ" % OFFSET_LIMITS)
+                values["gain_offset_db"] = round(gain_offset_db, 2)
+            if clear_trim:
+                values["trim_start"] = values["trim_end"] = None
+            else:
+                if trim_start is not None:
+                    values["trim_start"] = round(max(0.0, trim_start), 3) or None
+                if trim_end is not None:
+                    values["trim_end"] = round(trim_end, 3)
+                new_start = values.get("trim_start", track["trim_start"]) or 0.0
+                new_end = values.get("trim_end", track["trim_end"])
+                duration = track["duration"]
+                if new_end is not None:
+                    if duration is not None and new_end >= duration - 0.05:
+                        values["trim_end"] = new_end = None  # trimming nothing at the end
+                    elif new_end - new_start < MIN_TRIM_LENGTH:
+                        raise ValueError("Между началом и концом должно остаться хотя бы полсекунды")
+                if duration is not None and new_start >= duration - MIN_TRIM_LENGTH:
+                    raise ValueError("Начало слишком близко к концу трека")
+            if values:
+                self.store.set_sound(track_id, **values)
 
     def unbind(self, uid):
         with self.lock:
@@ -401,8 +510,21 @@ class Engine:
 
     def status(self):
         with self.lock:
-            return {**self.store.snapshot(), "current_tag": self.current,
+            data = self.store.snapshot()
+            for track in data["tracks"].values():
+                track["gain_db"] = auto_gain(track, data["settings"])
+            position, duration = self.player.position, self.player.duration
+            if self.track:
+                start, end = self._current_range(data)
+                if position is not None:
+                    position = max(0.0, position - start)
+                if end is not None:
+                    duration = end - start
+                elif duration is not None:
+                    duration = max(0.0, duration - start)
+            analysis = self.analyzer.status() if self.analyzer else {"queued": 0, "running": None}
+            return {**data, "current_tag": self.current,
                     "last_tag": self.last_uid, "selected_track": self.track, "playing_track": self.track, "source": self.source,
                     "pending": copy.deepcopy(self.pending), "message": self.message,
                     "reader_error": self.reader_error, "audio_error": self.audio_error,
-                    "position": self.player.position, "duration": self.player.duration}
+                    "position": position, "duration": duration, "analysis": analysis}

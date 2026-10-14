@@ -37,6 +37,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tracks/{track_id}/waveform": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Waveform */
+        get: operations["waveform_api_tracks__track_id__waveform_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/play": {
         parameters: {
             query?: never;
@@ -181,11 +198,28 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Rename Track */
-        put: operations["rename_track_api_tracks__track_id__put"];
+        /** Update Track */
+        put: operations["update_track_api_tracks__track_id__put"];
         post?: never;
         /** Delete Track */
         delete: operations["delete_track_api_tracks__track_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/analyze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Analyze */
+        post: operations["analyze_api_analyze_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -232,6 +266,26 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** Analysis */
+        Analysis: {
+            /** Queued */
+            queued: number;
+            /** Running */
+            running: string | null;
+        };
+        /**
+         * AnalyzeRequest
+         * @description No fields: analyze what is missing. `track`: re-run that one. `all`: re-run the whole library.
+         */
+        AnalyzeRequest: {
+            /** Track */
+            track?: string | null;
+            /**
+             * All
+             * @default false
+             */
+            all: boolean;
+        };
         /** Confirm */
         Confirm: {
             /** Uid */
@@ -275,6 +329,13 @@ export interface components {
             /** Old Track */
             old_track?: string | null;
         };
+        /** Play */
+        Play: {
+            /** Track */
+            track: string;
+            /** Position */
+            position?: number | null;
+        };
         /** Seek */
         Seek: {
             /** Position */
@@ -291,6 +352,16 @@ export interface components {
              * @default false
              */
             continue_playback: boolean;
+            /**
+             * Normalize
+             * @default true
+             */
+            normalize: boolean;
+            /**
+             * Target Lufs
+             * @default -16
+             */
+            target_lufs: number;
         };
         /** Status */
         Status: {
@@ -326,6 +397,7 @@ export interface components {
             position: number | null;
             /** Duration */
             duration: number | null;
+            analysis: components["schemas"]["Analysis"];
         };
         /**
          * Tag
@@ -342,11 +414,6 @@ export interface components {
             /** Uid */
             uid: string;
         };
-        /** Title */
-        Title: {
-            /** Title */
-            title: string;
-        };
         /** Track */
         Track: {
             /** Title */
@@ -357,11 +424,49 @@ export interface components {
             original: string;
             /** Created At */
             created_at: number;
+            /** Loudness Lufs */
+            loudness_lufs: number | null;
+            /** True Peak Db */
+            true_peak_db: number | null;
+            /** Duration */
+            duration: number | null;
+            /** Analyzed At */
+            analyzed_at: number | null;
+            /** Analysis Error */
+            analysis_error: string | null;
+            /**
+             * Gain Db
+             * @default 0
+             */
+            gain_db: number;
+            /**
+             * Gain Offset Db
+             * @default 0
+             */
+            gain_offset_db: number;
+            /** Trim Start */
+            trim_start: number | null;
+            /** Trim End */
+            trim_end: number | null;
         };
         /** TrackRef */
         TrackRef: {
             /** Track */
             track: string;
+        };
+        /**
+         * TrackUpdate
+         * @description Fields left out are not changed; trim_start/trim_end set to null together clear the trim.
+         */
+        TrackUpdate: {
+            /** Title */
+            title?: string | null;
+            /** Gain Offset Db */
+            gain_offset_db?: number | null;
+            /** Trim Start */
+            trim_start?: number | null;
+            /** Trim End */
+            trim_end?: number | null;
         };
         /** Uploaded */
         Uploaded: {
@@ -382,6 +487,17 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /** Waveform */
+        Waveform: {
+            /** Duration */
+            duration: number;
+            /** Peaks */
+            peaks: number[];
+            /** Silence Start */
+            silence_start: number | null;
+            /** Silence End */
+            silence_end: number | null;
         };
     };
     responses: never;
@@ -432,6 +548,37 @@ export interface operations {
             };
         };
     };
+    waveform_api_tracks__track_id__waveform_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                track_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Waveform"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     play_api_play_post: {
         parameters: {
             query?: never;
@@ -443,7 +590,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TrackRef"];
+                "application/json": components["schemas"]["Play"];
             };
         };
         responses: {
@@ -706,7 +853,7 @@ export interface operations {
             };
         };
     };
-    rename_track_api_tracks__track_id__put: {
+    update_track_api_tracks__track_id__put: {
         parameters: {
             query?: never;
             header?: {
@@ -719,7 +866,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["Title"];
+                "application/json": components["schemas"]["TrackUpdate"];
             };
         };
         responses: {
@@ -755,6 +902,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    analyze_api_analyze_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnalyzeRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

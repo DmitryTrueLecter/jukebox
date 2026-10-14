@@ -158,6 +158,30 @@ input[type="range"] { accent-color: var(--accent); margin: 0; }
 .player-volume { display: flex; align-items: center; gap: 8px; }
 .player-volume input { flex: 1; min-width: 0; }
 
+/* sound editor */
+.sound { margin: 8px 0 4px 50px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; }
+.sound-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sound .field.offset { margin: 10px 0; }
+.wave { position: relative; height: 84px; margin: 8px 0 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; cursor: pointer; user-select: none; touch-action: none; }
+.wave canvas { width: 100%; height: 100%; display: block; }
+.wave-shade { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--bg) 55%, transparent); pointer-events: none; }
+.wave-cursor { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); opacity: 0.7; pointer-events: none; }
+.wave-handle { position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; cursor: ew-resize; }
+.wave-handle::before { content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 2px; background: #e0a100; }
+.wave-handle::after { content: ""; position: absolute; top: 0; left: 1px; width: 12px; height: 12px; background: #e0a100; border-radius: 0 0 6px 6px; }
+.wave-handle.end::after { top: auto; bottom: 0; border-radius: 6px 6px 0 0; }
+.wave.dragging { cursor: ew-resize; }
+.trim-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.trim-time { width: 76px; padding: 4px 6px; font-size: 13px; }
+.trim-actions { margin-left: auto; display: flex; gap: 6px; }
+button.small { padding: 4px 9px; font-size: 13px; }
+.badge { display: inline-block; margin-left: 8px; padding: 1px 7px; font-size: 11px; font-weight: 500; border-radius: 999px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); vertical-align: middle; }
+.badge.bad { background: var(--error-bg); color: var(--error); }
+.duration { margin-left: 8px; font-weight: 400; }
+button.icon.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+h2.sub { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+
 /* dialog, toast */
 .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
 .dialog { background: var(--surface); border-radius: 14px; padding: 22px 24px; width: 100%; max-width: 420px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 10px; }
@@ -173,6 +197,7 @@ input[type="range"] { accent-color: var(--accent); margin: 0; }
   .sidebar { position: static; }
   .track-actions { opacity: 1; }
   .track-player { padding-left: 0; }
+  .sound { margin-left: 0; }
 }
 @media (max-width: 640px) {
   :root { --player-height: 112px; }
