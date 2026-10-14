@@ -272,6 +272,8 @@ export interface components {
             queued: number;
             /** Running */
             running: string | null;
+            /** Queue */
+            queue: string[];
         };
         /**
          * AnalyzeRequest

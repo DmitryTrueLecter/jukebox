@@ -101,6 +101,7 @@ class Settings(BaseModel):
 class Analysis(BaseModel):
     queued: int
     running: Optional[str]
+    queue: list[str]  # track ids waiting, in order
 
 
 class Pending(BaseModel):

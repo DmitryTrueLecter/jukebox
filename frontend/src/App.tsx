@@ -12,17 +12,20 @@ import { useLabelPrompt, usePlayback, useStatus, useVolume } from "./useStatus";
 export default function App() {
   const { status, receivedAt, connection } = useStatus();
   const playback = usePlayback(status, receivedAt);
-  const [error, setError] = useState<string | null>(null);
-  const run: Run = (action) =>
-    action().then(() => setError(null), (e) => setError(e instanceof ApiError ? e.message : String(e)));
+  const [toast, setToast] = useState<{ text: string; kind: "error" | "info" } | null>(null);
+  const run: Run = (action, success) =>
+    action().then(
+      () => setToast(success ? { text: success, kind: "info" } : null),
+      (e) => setToast({ text: e instanceof ApiError ? e.message : String(e), kind: "error" }),
+    );
   const { volume, setVolume } = useVolume(status, run);
   const { prompt, dismiss } = useLabelPrompt(status);
 
   useEffect(() => {
-    if (!error) return;
-    const timer = setTimeout(() => setError(null), 6000);
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), toast.kind === "error" ? 6000 : 3000);
     return () => clearTimeout(timer);
-  }, [error]);
+  }, [toast]);
 
   if (!status) {
     return (
@@ -58,9 +61,9 @@ export default function App() {
       </div>
       <PlayerBar status={status} playback={playback} volume={volume} setVolume={setVolume} run={run} />
       {prompt && <LabelDialog uid={prompt.uid} track={prompt.track} status={status} run={run} onClose={dismiss} />}
-      {error && (
-        <div className="toast" role="alert" onClick={() => setError(null)}>
-          {error}
+      {toast && (
+        <div className={`toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"} onClick={() => setToast(null)}>
+          {toast.text}
         </div>
       )}
     </main>

@@ -23,7 +23,10 @@ export default function SoundEditor({ id, track, status, playback, run }: Props)
   const offsetTimer = useRef<number | undefined>(undefined);
 
   const running = status.analysis.running === id;
+  const queuePosition = status.analysis.queue.indexOf(id);
+  const queued = queuePosition >= 0;
   const analyzed = track.analyzed_at != null;
+  const requestAnalysis = () => run(() => api.analyze({ track: id }), "Трек поставлен в очередь на анализ");
 
   useEffect(() => {
     if (!analyzed) return;
@@ -87,9 +90,14 @@ export default function SoundEditor({ id, track, status, playback, run }: Props)
     <div className="sound">
       <div className="sound-head">
         {running ? (
-          <span className="muted">Анализируется…</span>
+          <span className="badge">Анализируется…</span>
+        ) : queued ? (
+          <span className="muted">
+            В очереди на анализ{queuePosition > 0 && `, перед ним ещё ${queuePosition}`}
+            {status.analysis.running && <> · сейчас «{status.tracks[status.analysis.running]?.title ?? "…"}»</>}
+          </span>
         ) : track.analysis_error ? (
-          <span className="error" title={track.analysis_error}>Ошибка анализа: {track.analysis_error}</span>
+          <span className="error">Ошибка анализа: {track.analysis_error}. Нажми «Повторить»; если повторяется, файл повреждён.</span>
         ) : analyzed ? (
           <span className="muted small">
             Громкость {track.loudness_lufs?.toFixed(1) ?? "—"} LUFS · пик {track.true_peak_db?.toFixed(1) ?? "—"} дБ
@@ -98,8 +106,8 @@ export default function SoundEditor({ id, track, status, playback, run }: Props)
         ) : (
           <span className="muted">Ещё не проанализирован{status.analysis.queued ? " (в очереди)" : ""}</span>
         )}
-        <button className="link" disabled={running} onClick={() => run(() => api.analyze({ track: id }))}>
-          {analyzed ? "Проанализировать заново" : "Проанализировать"}
+        <button className={track.analysis_error ? "small primary" : "link"} disabled={running || queued} onClick={requestAnalysis}>
+          {track.analysis_error ? "Повторить" : analyzed ? "Проанализировать заново" : "Проанализировать"}
         </button>
       </div>
 
@@ -135,7 +143,9 @@ export default function SoundEditor({ id, track, status, playback, run }: Props)
       ) : analyzed ? (
         <p className="muted small">Загрузка волны…</p>
       ) : (
-        <p className="muted small">Обрезка появится после анализа.</p>
+        <p className="muted small">
+          {queued || running ? "Волна и обрезка появятся, когда анализ закончится." : "Обрезка появится после анализа."}
+        </p>
       )}
     </div>
   );

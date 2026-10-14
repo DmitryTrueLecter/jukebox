@@ -378,7 +378,7 @@ class AnalysisTests(unittest.TestCase):
         analyzer = Analyzer(store, analyze=fake_analyze)
         analyzer.enqueue_missing()
         analyzer.enqueue(["a"])  # already queued: no duplicate
-        self.assertEqual(analyzer.status(), {"queued": 3, "running": None})
+        self.assertEqual(analyzer.status(), {"queued": 3, "running": None, "queue": ["a", "b", "bad"]})
         analyzer.discard("b")
         analyzer.run_pending()
         self.assertEqual(seen, ["a.mp3", "bad.mp3"])
@@ -387,11 +387,16 @@ class AnalysisTests(unittest.TestCase):
         self.assertIsNotNone(track["analyzed_at"])
         self.assertEqual(json.loads(store.analysis_path("a").read_text())["peaks"], [0, 255])
         self.assertIn("ffmpeg", store.snapshot()["tracks"]["bad"]["analysis_error"])
-        analyzer.enqueue_missing()  # "bad" failed and is not retried automatically; "b" is still missing
-        self.assertEqual(analyzer.status()["queued"], 1)
+        analyzer.enqueue_missing()  # "b" is still missing and the failed "bad" gets another try
+        self.assertEqual(analyzer.status(), {"queued": 2, "running": None, "queue": ["b", "bad"]})
         analyzer.enqueue_all()
         self.assertEqual(analyzer.status()["queued"], 3)
         analyzer.run_pending()
+        analyzer.stopping = True  # a kill during shutdown must not be recorded as the file's fault
+        store.set_analysis_error("bad", "")
+        analyzer.enqueue(["bad"])
+        analyzer.run_pending()
+        self.assertEqual(store.snapshot()["tracks"]["bad"]["analysis_error"], "")
         store.delete_track("a")
         self.assertFalse(store.analysis_path("a").exists())
 
@@ -620,7 +625,7 @@ class HttpTests(unittest.TestCase):
             "silence_start": None, "silence_end": 118.0})
         self.engine.analyzer = analyzer
         client = self.client()
-        self.assertEqual(client.get("/api/status").json()["analysis"], {"queued": 0, "running": None})
+        self.assertEqual(client.get("/api/status").json()["analysis"], {"queued": 0, "running": None, "queue": []})
         self.assertEqual(client.get("/api/tracks/a/waveform").status_code, 404)
         self.assertEqual(client.post("/api/analyze", json={}, headers=JUKEBOX).status_code, 200)
         self.assertEqual(client.get("/api/status").json()["analysis"]["queued"], 2)

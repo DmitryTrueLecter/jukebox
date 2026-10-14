@@ -120,10 +120,9 @@ class Analyzer:
             self.cond.notify()
 
     def enqueue_missing(self):
-        """Tracks never analyzed (and without a recorded failure): the startup backlog."""
+        """Every track without a result, including earlier failures: the startup backlog and the "missing" button."""
         tracks = self.store.snapshot()["tracks"]
-        self.enqueue(sorted(tid for tid, t in tracks.items()
-                            if t["analyzed_at"] is None and not t["analysis_error"]))
+        self.enqueue(sorted(tid for tid, t in tracks.items() if t["analyzed_at"] is None))
 
     def enqueue_all(self):
         self.enqueue(sorted(self.store.snapshot()["tracks"]))
@@ -136,7 +135,7 @@ class Analyzer:
 
     def status(self):
         with self.cond:
-            return {"queued": len(self.queue), "running": self.running}
+            return {"queued": len(self.queue), "running": self.running, "queue": list(self.queue)}
 
     def start(self):
         self.thread = threading.Thread(target=self._run, name="analyzer", daemon=True)
@@ -188,6 +187,8 @@ class Analyzer:
             try:
                 result = self.analyze(path, on_process=self._register)
             except Exception as exc:
+                if self.stopping:
+                    return  # killed by shutdown, not a bad file: it is picked up again at the next start
                 LOG.warning("Analysis failed track=%s: %s", track_id, exc)
                 self.store.set_analysis_error(track_id, str(exc))
                 return

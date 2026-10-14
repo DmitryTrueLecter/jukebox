@@ -526,7 +526,7 @@ class Engine:
                     duration = end - start
                 elif duration is not None:
                     duration = max(0.0, duration - start)
-            analysis = self.analyzer.status() if self.analyzer else {"queued": 0, "running": None}
+            analysis = self.analyzer.status() if self.analyzer else {"queued": 0, "running": None, "queue": []}
             return {**data, "current_tag": self.current,
                     "last_tag": self.last_uid, "selected_track": self.track, "playing_track": self.track, "source": self.source,
                     "pending": copy.deepcopy(self.pending), "message": self.message,

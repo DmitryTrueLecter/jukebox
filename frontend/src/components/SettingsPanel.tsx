@@ -26,7 +26,8 @@ export default function SettingsPanel({ status, volume, setVolume, run }: Props)
   const tracks = Object.values(status.tracks);
   const total = tracks.length;
   const analyzed = tracks.filter((t) => t.analyzed_at != null).length;
-  const missing = tracks.filter((t) => t.analyzed_at == null && !t.analysis_error).length;
+  const missing = tracks.filter((t) => t.analyzed_at == null).length;
+  const failed = tracks.filter((t) => t.analysis_error && t.analyzed_at == null).length;
 
   const saveGrace = () => {
     const value = Number(grace);
@@ -91,12 +92,14 @@ export default function SettingsPanel({ status, volume, setVolume, run }: Props)
       </p>
       <div className="row">
         {missing > 0 && (
-          <button onClick={() => run(() => api.analyze())}>Проанализировать недостающие ({missing})</button>
+          <button onClick={() => run(() => api.analyze(), "Недостающие треки поставлены в очередь")}>
+            Проанализировать недостающие ({missing}{failed > 0 && `, из них с ошибкой ${failed}`})
+          </button>
         )}
         <button
           onClick={() => {
             if (window.confirm("Заново проанализировать все треки? На Raspberry Pi это займёт несколько минут.")) {
-              run(() => api.analyze({ all: true }));
+              run(() => api.analyze({ all: true }), "Все треки поставлены в очередь");
             }
           }}
         >

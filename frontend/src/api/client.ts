@@ -11,8 +11,8 @@ export type TrackUpdate = components["schemas"]["TrackUpdate"];
 
 export class ApiError extends Error {}
 
-/** Runs an API call and routes its failure to the app's error toast. */
-export type Run = (action: () => Promise<unknown>) => void;
+/** Runs an API call; a failure goes to the app's error toast, `success` (if given) to a confirmation toast. */
+export type Run = (action: () => Promise<unknown>, success?: string) => void;
 
 function parseError(data: unknown, status: number) {
   const message = (data as { error?: string } | null)?.error;

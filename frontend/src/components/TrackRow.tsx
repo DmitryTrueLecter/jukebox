@@ -20,6 +20,7 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
   const [sound, setSound] = useState(false);
   const playing = status.playing_track === id;
   const analyzing = status.analysis.running === id;
+  const queued = status.analysis.queue.includes(id);
   const busy = Boolean(status.pending);
 
   const remove = () => {
@@ -55,8 +56,13 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           ) : (
             <div className="track-title" onDoubleClick={() => setEditing("title")} title="Двойной клик — переименовать">
               {track.title}
-              {analyzing && <span className="badge">анализ…</span>}
-              {track.analysis_error && <span className="badge bad" title={track.analysis_error}>ошибка анализа</span>}
+              {analyzing && <span className="badge">анализируется…</span>}
+              {queued && !analyzing && <span className="badge quiet">в очереди на анализ</span>}
+              {track.analysis_error && !analyzing && !queued && (
+                <button className="badge bad" title={`${track.analysis_error}. Нажми, чтобы открыть и повторить`} onClick={() => setSound(true)}>
+                  ошибка анализа
+                </button>
+              )}
               {track.duration != null && (
                 <span className="muted small duration">{formatTime((track.trim_end ?? track.duration) - (track.trim_start ?? 0))}</span>
               )}
@@ -95,7 +101,7 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           </div>
         </div>
         <div className="track-actions">
-          <button className={`icon ${sound ? "on" : ""}`} onClick={() => setSound(!sound)} title="Звук: громкость и обрезка">🎚</button>
+          <button className={`text ${sound ? "on" : ""}`} onClick={() => setSound(!sound)} title="Громкость, обрезка и анализ трека">Звук</button>
           <button className="icon" onClick={() => setEditing("title")} title="Переименовать">✎</button>
           <button className="icon danger" onClick={remove} title="Удалить трек">🗑</button>
         </div>
