@@ -14,12 +14,12 @@ Agreed on 2026-10-13. The web UI text stays Russian; everything else is in Engli
 ## Phase 1: foundation (done 2026-10-13)
 
 - SQLite store with a one-time import of `library.json` (the file is kept for rollbacks).
-- FastAPI backend with the same endpoints and error format, plus SSE and static serving. Legacy UI at `/legacy`, API docs at `/docs`.
+- FastAPI backend with the same endpoints and error format, plus SSE and static serving. API docs at `/docs`.
 - React skeleton: track list with play/stop, status message, bottom bar with the current time.
 
-## Phase 2: UI parity and first features (code done 2026-10-14, awaiting the on-device check)
+## Phase 2: UI parity and first features (done 2026-10-14)
 
-Goal: the React UI replaces `index.html` completely, then `index.html` and `/legacy` are deleted. Implemented on 2026-10-14; `index.html` stays until the binding flow has been checked with real discs, then it is deleted.
+The React UI replaced `index.html` completely; checked on the device with real discs, then `index.html` and `/legacy` were deleted.
 
 Parity with the legacy UI:
 - Upload (multiple files, progress, duplicate notice, errors).

@@ -500,10 +500,10 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn("TAG_A", status["tags"])
         self.assertEqual(client.delete("/api/tracks/a", headers=JUKEBOX).status_code, 400)
 
-    def test_legacy_ui_served_without_frontend_build(self):
+    def test_root_without_frontend_build_is_a_clear_error(self):
         response = self.client().get("/")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("text/html", response.headers["content-type"])
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("static", response.json()["error"])
 
     def test_status_key_ignores_position(self):
         status = self.engine.status()

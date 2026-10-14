@@ -16,7 +16,7 @@ import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -181,7 +181,7 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        if request.url.path.startswith("/api/") or request.url.path in ("/", "/legacy"):
+        if request.url.path.startswith("/api/") or request.url.path == "/":
             response.headers["Cache-Control"] = "no-store"
         if request.method != "GET":
             LOG.info("%s %s %s", request.method, request.url.path, response.status_code)
@@ -297,18 +297,13 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
     app.include_router(api)
     app.include_router(post)
 
-    legacy = HERE / "index.html"
-
-    @app.get("/legacy", include_in_schema=False)
-    def legacy_ui():
-        return FileResponse(legacy)
-
     if (static_dir / "index.html").is_file():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
     else:
         @app.get("/", include_in_schema=False)
         def root():
-            return FileResponse(legacy)
+            # deploy.ps1 ships frontend/dist as static/; a release without it has no UI
+            raise HTTPException(503, "Веб-интерфейс не собран: static/index.html отсутствует")
 
     return app
 
