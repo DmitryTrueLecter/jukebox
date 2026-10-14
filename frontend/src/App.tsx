@@ -1,62 +1,67 @@
-import { useState } from "react";
-import { api, ApiError } from "./api/client";
-import { usePosition, useStatus } from "./useStatus";
-
-function formatTime(seconds: number | null | undefined) {
-  if (seconds == null) return "–:––";
-  const s = Math.floor(seconds);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
+import { useEffect, useState } from "react";
+import { ApiError, type Run } from "./api/client";
+import LabelDialog from "./components/LabelDialog";
+import PlayerBar from "./components/PlayerBar";
+import SettingsPanel from "./components/SettingsPanel";
+import StatusStrip from "./components/StatusStrip";
+import TrackList from "./components/TrackList";
+import Upload from "./components/Upload";
+import { plural } from "./format";
+import { useLabelPrompt, usePlayback, useStatus, useVolume } from "./useStatus";
 
 export default function App() {
   const { status, receivedAt, connection } = useStatus();
-  const position = usePosition(status, receivedAt);
+  const playback = usePlayback(status, receivedAt);
   const [error, setError] = useState<string | null>(null);
-
-  const run = (action: () => Promise<unknown>) =>
+  const run: Run = (action) =>
     action().then(() => setError(null), (e) => setError(e instanceof ApiError ? e.message : String(e)));
+  const { volume, setVolume } = useVolume(status, run);
+  const { prompt, dismiss } = useLabelPrompt(status);
 
-  if (!status) return <main className="app"><p className="muted">Подключение…</p></main>;
+  useEffect(() => {
+    if (!error) return;
+    const timer = setTimeout(() => setError(null), 6000);
+    return () => clearTimeout(timer);
+  }, [error]);
 
-  const tracks = Object.entries(status.tracks);
-  const tagsByTrack = new Map<string, string[]>();
-  for (const [uid, track] of Object.entries(status.tags)) {
-    tagsByTrack.set(track, [...(tagsByTrack.get(track) ?? []), uid]);
+  if (!status) {
+    return (
+      <main className="app loading">
+        <p className="muted">{connection === "offline" ? "Нет связи с Raspberry Pi, переподключение…" : "Подключение…"}</p>
+      </main>
+    );
   }
-  const playing = status.playing_track;
+
+  const discs = Object.values(status.tags).filter((tag) => tag.track).length;
 
   return (
     <main className="app">
       <header className="header">
-        <h1>Jukebox</h1>
-        <span className={`connection ${connection}`}>{connection === "online" ? "на связи" : "нет связи"}</span>
+        <div>
+          <div className="eyebrow">NFC music player</div>
+          <h1>Jukebox</h1>
+        </div>
+        <div className="header-side">
+          <span className="muted small">
+            {plural(Object.keys(status.tracks).length, "трек", "трека", "треков")} · {plural(discs, "диск", "диска", "дисков")}
+          </span>
+          <span className={`connection ${connection}`}>{connection === "online" ? "на связи" : "нет связи"}</span>
+        </div>
       </header>
-      <p className="message">{status.message}</p>
-      {(error || status.reader_error || status.audio_error) && (
-        <p className="error">{error ?? status.audio_error ?? status.reader_error}</p>
-      )}
-      <table className="tracks">
-        <thead><tr><th /><th>Трек</th><th>Метки</th></tr></thead>
-        <tbody>
-          {tracks.map(([id, track]) => (
-            <tr key={id} className={id === playing ? "active" : undefined}>
-              <td>
-                <button onClick={() => run(id === playing ? api.stop : () => api.play(id))}>
-                  {id === playing ? "■" : "▶"}
-                </button>
-              </td>
-              <td>{track.title}</td>
-              <td className="muted">{(tagsByTrack.get(id) ?? []).join(", ")}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {playing && (
-        <footer className="player">
-          <button onClick={() => run(api.stop)}>■</button>
-          <span>{status.tracks[playing]?.title}</span>
-          <span className="muted">{formatTime(position)} / {formatTime(status.duration)}</span>
-        </footer>
+      <StatusStrip status={status} connection={connection} run={run} />
+      <div className="columns">
+        <TrackList status={status} playback={playback} run={run} />
+        <aside className="sidebar">
+          <Upload />
+          <SettingsPanel status={status} volume={volume} setVolume={setVolume} run={run} />
+        </aside>
+      </div>
+      <PlayerBar status={status} playback={playback} volume={volume} setVolume={setVolume} run={run} />
+      {prompt && <LabelDialog uid={prompt.uid} track={prompt.track} status={status} run={run} onClose={dismiss} />}
+      {error && (
+        <div className="toast" role="alert" onClick={() => setError(null)}>
+          {error}
+        </div>
       )}
     </main>
   );

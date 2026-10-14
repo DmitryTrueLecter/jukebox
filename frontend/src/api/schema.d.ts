@@ -156,6 +156,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tags/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set Label */
+        put: operations["set_label_api_tags__uid__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tracks/{track_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Rename Track */
+        put: operations["rename_track_api_tracks__track_id__put"];
+        post?: never;
+        /** Delete Track */
+        delete: operations["delete_track_api_tracks__track_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings": {
         parameters: {
             query?: never;
@@ -208,6 +243,11 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** Label */
+        Label: {
+            /** Label */
+            label: string;
         };
         /** Ok */
         Ok: {
@@ -262,7 +302,7 @@ export interface components {
             };
             /** Tags */
             tags: {
-                [key: string]: string;
+                [key: string]: components["schemas"]["Tag"];
             };
             settings: components["schemas"]["Settings"];
             /** Current Tag */
@@ -287,10 +327,25 @@ export interface components {
             /** Duration */
             duration: number | null;
         };
+        /**
+         * Tag
+         * @description A disc. `track` is None for a labelled disc that is not bound to anything.
+         */
+        Tag: {
+            /** Track */
+            track: string | null;
+            /** Label */
+            label: string | null;
+        };
         /** TagRef */
         TagRef: {
             /** Uid */
             uid: string;
+        };
+        /** Title */
+        Title: {
+            /** Title */
+            title: string;
         };
         /** Track */
         Track: {
@@ -300,6 +355,8 @@ export interface components {
             file: string;
             /** Original */
             original: string;
+            /** Created At */
+            created_at: number;
         };
         /** TrackRef */
         TrackRef: {
@@ -591,6 +648,113 @@ export interface operations {
                 "application/json": components["schemas"]["TagRef"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_label_api_tags__uid__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Label"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_track_api_tracks__track_id__put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path: {
+                track_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Title"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_track_api_tracks__track_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path: {
+                track_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

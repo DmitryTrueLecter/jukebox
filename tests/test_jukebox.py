@@ -95,22 +95,22 @@ class EngineTests(unittest.TestCase):
         self.engine.tick(None, 1.3)
         self.engine.tick("TAG_A", 1.6)
         self.assertEqual(self.engine.pending["phase"], "remove")
-        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], "a")
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"]["track"], "a")
 
     def test_conflict_needs_exact_confirmation_and_persists(self):
         self.scan_ready()
         self.engine.tick("TAG_A", 1.5)
-        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], "a")
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"]["track"], "a")
         with self.assertRaises(ValueError):
             self.engine.confirm("TAG_B", "b")
         self.engine.confirm("TAG_A", "b")
-        self.assertEqual(self.open_store().snapshot()["tags"]["TAG_A"], "b")
+        self.assertEqual(self.open_store().snapshot()["tags"]["TAG_A"]["track"], "b")
 
     def test_new_binding_and_cancel_do_not_autoplay(self):
         self.scan_ready()
         self.now = 1.5
         self.engine.tick("NEW", 1.5)
-        self.assertEqual(self.store.snapshot()["tags"]["NEW"], "b")
+        self.assertEqual(self.store.snapshot()["tags"]["NEW"]["track"], "b")
         self.engine.tick("NEW", 1.6)
         self.assertNotIn("b.mp3", self.player.events)
 
@@ -120,7 +120,7 @@ class EngineTests(unittest.TestCase):
         self.now = 121
         with self.assertRaises(ValueError):
             self.engine.confirm("TAG_A", "b")
-        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], "a")
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"]["track"], "a")
 
     def open_store(self):
         store = Store(self.temp.name)
@@ -130,8 +130,8 @@ class EngineTests(unittest.TestCase):
     def test_failed_write_rolls_back(self):
         with self.assertRaises(sqlite3.IntegrityError):
             self.store.bind_tag("TAG_A", "no-such-track")  # foreign key violation
-        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], "a")
-        self.assertEqual(self.open_store().snapshot()["tags"]["TAG_A"], "a")
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"]["track"], "a")
+        self.assertEqual(self.open_store().snapshot()["tags"]["TAG_A"]["track"], "a")
     def test_eof_repeats_with_tag(self):
         self.engine.tick("TAG_A", 1)
         self.player.ended = True
@@ -212,6 +212,66 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine.track)
 
 
+    def test_unbind_keeps_labelled_disc(self):
+        self.engine.set_label("TAG_A", "  красно-жёлтый ")
+        self.engine.unbind("TAG_A")
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], {"track": None, "label": "красно-жёлтый"})
+        self.engine.unbind("TAG_B")
+        self.assertNotIn("TAG_B", self.store.snapshot()["tags"])
+        self.engine.tick("TAG_A", 1)
+        self.assertIsNone(self.engine.track)
+        self.assertEqual(self.engine.message, "Неизвестная метка: красно-жёлтый")
+
+    def test_labelled_disc_binds_without_conflict_and_empty_label_forgets_it(self):
+        self.engine.set_label("NEW", "синий")
+        self.scan_ready()
+        self.engine.tick("NEW", 1.5)
+        self.assertEqual(self.store.snapshot()["tags"]["NEW"], {"track": "b", "label": "синий"})
+        self.assertIn("синий привязана", self.engine.message)
+        self.engine.unbind("NEW")
+        self.engine.set_label("NEW", "")
+        self.assertNotIn("NEW", self.store.snapshot()["tags"])
+        with self.assertRaises(ValueError):
+            self.engine.set_label("NEW", "x" * 81)
+
+    def test_rename(self):
+        self.engine.tick("TAG_A", 1)
+        self.engine.rename("a", "  Новое   имя ")
+        self.assertEqual(self.store.snapshot()["tracks"]["a"]["title"], "Новое имя")
+        self.assertEqual(self.engine.message, "Воспроизведение: Новое имя")
+        for bad in ("", "   ", "x" * 241):
+            with self.assertRaises(ValueError):
+                self.engine.rename("a", bad)
+        with self.assertRaises(ValueError):
+            self.engine.rename("nope", "x")
+
+    def test_delete_track_stops_it_unbinds_and_removes_file(self):
+        self.engine.set_label("TAG_A", "диск")
+        self.engine.tick("TAG_A", 1)
+        self.engine.delete_track("a")
+        self.assertIsNone(self.engine.track)
+        self.assertEqual(self.player.events[-1], "stop")
+        self.assertFalse((self.store.root / "music" / "a.mp3").exists())
+        self.assertNotIn("a", self.store.snapshot()["tracks"])
+        self.assertEqual(self.store.snapshot()["tags"]["TAG_A"], {"track": None, "label": "диск"})
+        self.engine.tick("TAG_A", 1.2)  # the present tag does not restart anything
+        self.assertEqual(self.player.events.count("a.mp3"), 1)
+        self.engine.delete_track("b")
+        self.assertNotIn("TAG_B", self.store.snapshot()["tags"])
+        with self.assertRaises(ValueError):
+            self.engine.delete_track("a")
+
+    def test_delete_track_cancels_its_binding_and_resume(self):
+        self.store.update_settings(continue_playback=True)
+        self.engine.tick("TAG_A", 1)
+        self.player.elapsed = 42
+        self.engine.tick(None, 3)
+        self.assertEqual(self.engine._resume_positions, {"TAG_A": ("a", 42)})
+        self.engine.arm("a")
+        self.engine.delete_track("a")
+        self.assertIsNone(self.engine.pending)
+        self.assertEqual(self.engine._resume_positions, {})
+
 
 class StoreImportTests(unittest.TestCase):
     def test_library_json_is_imported_once(self):
@@ -224,7 +284,7 @@ class StoreImportTests(unittest.TestCase):
             store = Store(root)
             data = store.snapshot()
             self.assertEqual(data["tracks"]["t1"]["title"], "Song")
-            self.assertEqual(data["tags"], {"AA": "t1"})  # BB pointed at a missing track
+            self.assertEqual(data["tags"], {"AA": {"track": "t1", "label": None}})  # BB pointed at a missing track
             self.assertEqual(data["settings"], {"volume": 70, "read_grace_ms": 1000, "continue_playback": True})
             store.db.close()
             Path(root, "library.json").write_text(json.dumps({**legacy, "tracks": {}}), encoding="utf-8")
@@ -419,6 +479,26 @@ class HttpTests(unittest.TestCase):
     def test_upload_rejects_unknown_extension(self):
         response = self.client().post("/api/upload", params={"name": "x.exe"}, content=b"x", headers=JUKEBOX)
         self.assertEqual(response.status_code, 400)
+
+    def test_tags_are_objects_and_labels_are_editable(self):
+        client = self.client()
+        self.assertEqual(client.get("/api/status").json()["tags"]["TAG_A"], {"track": "a", "label": None})
+        self.assertEqual(client.put("/api/tags/TAG_A", json={"label": "диск"}, headers=JUKEBOX).status_code, 200)
+        self.assertEqual(client.get("/api/status").json()["tags"]["TAG_A"], {"track": "a", "label": "диск"})
+        self.assertEqual(client.put("/api/tags/TAG_A", json={"label": "диск"}).status_code, 403)
+        self.assertEqual(client.put("/api/tags/TAG_A", json={"label": "x" * 81}, headers=JUKEBOX).status_code, 400)
+
+    def test_rename_and_delete_track(self):
+        client = self.client()
+        self.assertEqual(client.put("/api/tracks/a", json={"title": "Песня"}, headers=JUKEBOX).status_code, 200)
+        self.assertEqual(client.get("/api/status").json()["tracks"]["a"]["title"], "Песня")
+        self.assertEqual(client.put("/api/tracks/a", json={"title": " "}, headers=JUKEBOX).status_code, 400)
+        self.assertEqual(client.delete("/api/tracks/a").status_code, 403)
+        self.assertEqual(client.delete("/api/tracks/a", headers=JUKEBOX).status_code, 200)
+        status = client.get("/api/status").json()
+        self.assertNotIn("a", status["tracks"])
+        self.assertNotIn("TAG_A", status["tags"])
+        self.assertEqual(client.delete("/api/tracks/a", headers=JUKEBOX).status_code, 400)
 
     def test_legacy_ui_served_without_frontend_build(self):
         response = self.client().get("/")

@@ -90,8 +90,8 @@ class Store:
                 db.execute("INSERT INTO tracks VALUES (?, ?, ?, ?, ?)",
                            (track_id, track["title"], track["file"], track.get("original", ""), now))
             for uid, track_id in data["tags"].items():
-                db.execute("INSERT INTO tags VALUES (?, ?, NULL, ?)",
-                           (uid, track_id if track_id in data["tracks"] else None, now))
+                if track_id in data["tracks"]:  # an unlabelled tag without a track has nothing to keep
+                    db.execute("INSERT INTO tags VALUES (?, ?, NULL, ?)", (uid, track_id, now))
             settings = {**DEFAULT_SETTINGS,
                         **{k: v for k, v in data["settings"].items() if k in DEFAULT_SETTINGS}}
             for key, value in settings.items():
@@ -100,13 +100,17 @@ class Store:
         LOG.info("Imported library.json: %s tracks, %s tags", len(data["tracks"]), len(data["tags"]))
 
     def snapshot(self):
+        """{"tracks": {id: {...}}, "tags": {uid: {"track": id | None, "label": str | None}}, "settings": {...}}.
+
+        Tags include labelled discs that are not bound to any track; unlabelled unbound tags are not stored.
+        """
         with self.lock:
             if self._cache is None:
-                tracks = {row[0]: {"title": row[1], "file": row[2], "original": row[3]}
+                tracks = {row[0]: {"title": row[1], "file": row[2], "original": row[3], "created_at": row[4]}
                           for row in self.db.execute(
-                              "SELECT id, title, file, original FROM tracks ORDER BY title")}
-                tags = dict(self.db.execute(
-                    "SELECT uid, track_id FROM tags WHERE track_id IS NOT NULL ORDER BY uid"))
+                              "SELECT id, title, file, original, created_at FROM tracks ORDER BY title")}
+                tags = {row[0]: {"track": row[1], "label": row[2]}
+                        for row in self.db.execute("SELECT uid, track_id, label FROM tags ORDER BY uid")}
                 settings = {**DEFAULT_SETTINGS,
                             **{k: json.loads(v) for k, v in self.db.execute("SELECT key, value FROM settings")}}
                 self._cache = {"version": 1, "tracks": tracks, "tags": tags, "settings": settings}
@@ -117,6 +121,20 @@ class Store:
             db.execute("INSERT OR REPLACE INTO tracks VALUES (?, ?, ?, ?, ?)",
                        (track_id, title, file, original, time.time()))
 
+    def rename_track(self, track_id, title):
+        with self._tx() as db:
+            db.execute("UPDATE tracks SET title = ? WHERE id = ?", (title, track_id))
+
+    def delete_track(self, track_id):
+        """Remove the track row; its tags are unbound (labelled ones stay). Returns the file name."""
+        with self._tx() as db:
+            row = db.execute("SELECT file FROM tracks WHERE id = ?", (track_id,)).fetchone()
+            if row is None:
+                raise ValueError("Трек не найден")
+            db.execute("DELETE FROM tracks WHERE id = ?", (track_id,))  # tags.track_id -> NULL
+            db.execute("DELETE FROM tags WHERE track_id IS NULL AND label IS NULL")
+        return row[0]
+
     def bind_tag(self, uid, track_id):
         with self._tx() as db:
             db.execute("INSERT INTO tags VALUES (?, ?, NULL, ?) "
@@ -124,13 +142,36 @@ class Store:
                        (uid, track_id, time.time()))
 
     def unbind_tag(self, uid):
+        """Drop the track binding; a labelled disc keeps its row (and name)."""
         with self._tx() as db:
-            db.execute("DELETE FROM tags WHERE uid = ?", (uid,))
+            db.execute("UPDATE tags SET track_id = NULL WHERE uid = ?", (uid,))
+            db.execute("DELETE FROM tags WHERE uid = ? AND label IS NULL", (uid,))
+
+    def set_tag_label(self, uid, label):
+        label = label.strip() or None
+        with self._tx() as db:
+            db.execute("INSERT INTO tags VALUES (?, NULL, ?, ?) "
+                       "ON CONFLICT(uid) DO UPDATE SET label = excluded.label",
+                       (uid, label, time.time()))
+            db.execute("DELETE FROM tags WHERE uid = ? AND track_id IS NULL AND label IS NULL", (uid,))
 
     def update_settings(self, **values):
         with self._tx() as db:
             for key, value in values.items():
                 db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
+
+
+def bound_track(data, uid):
+    """Track id bound to the tag, or None (unknown tag or a labelled disc without a track)."""
+    tag = data["tags"].get(uid)
+    return tag["track"] if tag else None
+
+
+def tag_name(data, uid):
+    """What the UI calls the disc: its label when it has one, otherwise the UID."""
+    tag = data["tags"].get(uid)
+    return (tag and tag["label"]) or uid
+
 
 class Engine:
     def __init__(self, store, player, clock=time.monotonic):
@@ -180,7 +221,7 @@ class Engine:
             if self.pending:
                 raise ValueError("Сначала заверши или отмени привязку")
             self.suppressed = self.current
-            mapped = self.store.snapshot()["tags"].get(self.current)
+            mapped = bound_track(self.store.snapshot(), self.current)
             source = "tag" if mapped == track_id else "manual"
             if source == "tag":
                 self.suppressed = None
@@ -209,7 +250,8 @@ class Engine:
         self.current = uid
         self.suppressed = uid
         self.last_seen = self.clock()
-        self.message = f"Метка {uid} привязана. Вынь и вставь диск для запуска."
+        name = tag_name(self.store.snapshot(), uid)
+        self.message = f"Метка {name} привязана. Вынь и вставь диск для запуска."
 
     def confirm(self, uid, track_id):
         with self.lock:
@@ -242,6 +284,43 @@ class Engine:
                 self.stop()
             self.message = "Привязка удалена, трек сохранён"
 
+    def set_label(self, uid, label):
+        with self.lock:
+            if len(label.strip()) > 80:
+                raise ValueError("Название диска: не больше 80 символов")
+            self.store.set_tag_label(uid, label)
+
+    def rename(self, track_id, title):
+        with self.lock:
+            title = " ".join(title.split())
+            if not title:
+                raise ValueError("Название не может быть пустым")
+            if len(title) > 240:
+                raise ValueError("Название: не больше 240 символов")
+            if track_id not in self.store.snapshot()["tracks"]:
+                raise ValueError("Трек не найден")
+            self.store.rename_track(track_id, title)
+            if self.track == track_id:
+                self.message = "Воспроизведение: " + title
+
+    def delete_track(self, track_id):
+        """Stop it if needed, forget it, remove the file. Labelled discs survive unbound."""
+        with self.lock:
+            track = self.store.snapshot()["tracks"].get(track_id)
+            if track is None:
+                raise ValueError("Трек не найден")
+            if self.pending and self.pending["track"] == track_id:
+                self.cancel()
+            if self.track == track_id:
+                self.suppressed = self.current
+                self.stop()
+            self._resume_positions = {uid: saved for uid, saved in self._resume_positions.items()
+                                      if saved[0] != track_id}
+            file = self.store.delete_track(track_id)
+            (self.store.root / "music" / file).unlink(missing_ok=True)
+            self.message = f"Трек «{track['title']}» удалён"
+            logging.info("DELETE track=%s file=%s", track_id, file)
+
     def tick(self, uid, now=None):
         with self.lock:
             now = self.clock() if now is None else now
@@ -266,8 +345,9 @@ class Engine:
                         p["phase"] = "scan"
                         self.message = "Поднеси метку для выбранного трека"
                 elif p["phase"] == "scan" and uid:
-                    if uid in data["tags"] and data["tags"][uid] != p["track"]:
-                        p.update(phase="conflict", uid=uid, old_track=data["tags"][uid])
+                    old_track = bound_track(data, uid)
+                    if old_track and old_track != p["track"]:
+                        p.update(phase="conflict", uid=uid, old_track=old_track)
                         self.message = "Метка уже занята. Подтверди замену или отмени."
                     else:
                         self.save_binding(uid, p["track"])
@@ -291,11 +371,11 @@ class Engine:
                     self.current = uid
                     self.suppressed = None
                     self.stop()
-                    track_id = data["tags"].get(uid)
+                    track_id = bound_track(data, uid)
                     if track_id:
                         self.start(track_id, "tag")
                     else:
-                        self.message = f"Неизвестная метка: {uid}"
+                        self.message = f"Неизвестная метка: {tag_name(data, uid)}"
             try:
                 ended = self.player.poll() == "eof"
             except Exception as exc:
@@ -313,7 +393,7 @@ class Engine:
                 if (previous_source == "tag" and self.current
                         and self.current != self.suppressed
                         and now - self.last_seen < delay):
-                    track_id = data["tags"].get(self.current)
+                    track_id = bound_track(data, self.current)
                     if track_id:
                         self.start(track_id, "tag")
                 else:

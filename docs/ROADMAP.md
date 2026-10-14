@@ -17,9 +17,9 @@ Agreed on 2026-10-13. The web UI text stays Russian; everything else is in Engli
 - FastAPI backend with the same endpoints and error format, plus SSE and static serving. Legacy UI at `/legacy`, API docs at `/docs`.
 - React skeleton: track list with play/stop, status message, bottom bar with the current time.
 
-## Phase 2: UI parity and first features (next)
+## Phase 2: UI parity and first features (code done 2026-10-14, awaiting the on-device check)
 
-Goal: the React UI replaces `index.html` completely, then `index.html` and `/legacy` are deleted.
+Goal: the React UI replaces `index.html` completely, then `index.html` and `/legacy` are deleted. Implemented on 2026-10-14; `index.html` stays until the binding flow has been checked with real discs, then it is deleted.
 
 Parity with the legacy UI:
 - Upload (multiple files, progress, duplicate notice, errors).
@@ -33,9 +33,11 @@ New features:
 2. **Tag labels** ("красно-желтый"). Backend: `tags.label` already exists. Add `PUT /api/tags/{uid}` (label), return tags as objects in status (`{uid: {track, label}}`), and update Engine/legacy accordingly. Unbinding keeps the label (set `track_id` NULL instead of deleting the row) so a disc keeps its name. Ask for a label right after binding; the unknown-tag message shows the label when known. Optional colour swatch per tag.
 3. **Delete track.** `DELETE /api/tracks/{id}`: stop it if it is playing, remove the file, unbind its tags (keep the labelled tag rows), drop resume positions. Confirmation in the UI.
 
-Open questions for phase 2:
-- Sorting/search in the track list (title, recently added)?
-- Rename tracks (the title currently comes from the file name)?
+Decided during phase 2:
+- Track list has a search box (title, UID, label) and a sort switch (title / newest first; `Track.created_at` is in the API for that).
+- Tracks can be renamed inline (`PUT /api/tracks/{id}`), since the title comes from the file name.
+- Labelled discs without a track are listed under the tracks ("Диски без трека"); an empty label forgets the disc.
+- A seek does not push an SSE event; the client extrapolates from the seek target until the next event.
 
 ## Phase 3: per-track sound
 

@@ -69,6 +69,13 @@ class Track(BaseModel):
     title: str
     file: str
     original: str
+    created_at: float
+
+
+class Tag(BaseModel):
+    """A disc. `track` is None for a labelled disc that is not bound to anything."""
+    track: Optional[str]
+    label: Optional[str]
 
 
 class Settings(BaseModel):
@@ -89,7 +96,7 @@ class Pending(BaseModel):
 class Status(BaseModel):
     version: int
     tracks: dict[str, Track]
-    tags: dict[str, str]
+    tags: dict[str, Tag]
     settings: Settings
     current_tag: Optional[str]
     last_tag: Optional[str]
@@ -119,6 +126,14 @@ class Confirm(BaseModel):
 
 class Seek(BaseModel):
     position: float
+
+
+class Label(BaseModel):
+    label: str = Field(max_length=80)
+
+
+class Title(BaseModel):
+    title: str = Field(max_length=240)
 
 
 class Ok(BaseModel):
@@ -173,6 +188,7 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
         return response
 
     api = APIRouter(prefix="/api")
+    # Every mutating route (POST/PUT/DELETE) lives on this router and needs the X-Jukebox header.
     post = APIRouter(prefix="/api", dependencies=[Depends(require_jukebox_header)])
 
     @api.get("/status", response_model=Status)
@@ -227,6 +243,21 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
     @post.post("/unbind", response_model=Ok)
     def unbind(body: TagRef):
         engine.unbind(body.uid)
+        return Ok()
+
+    @post.put("/tags/{uid}", response_model=Ok)
+    def set_label(uid: str, body: Label):
+        engine.set_label(uid, body.label)
+        return Ok()
+
+    @post.put("/tracks/{track_id}", response_model=Ok)
+    def rename_track(track_id: str, body: Title):
+        engine.rename(track_id, body.title)
+        return Ok()
+
+    @post.delete("/tracks/{track_id}", response_model=Ok)
+    def delete_track(track_id: str):
+        engine.delete_track(track_id)
         return Ok()
 
     @post.post("/settings", response_model=Ok)
