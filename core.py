@@ -254,7 +254,9 @@ class Engine:
         self.track = None
         self.source = None
 
-    def start(self, track_id, source):
+    def start(self, track_id, source, position=None):
+        """`position` (seconds inside the trimmed range) overrides the start point; mpv cannot seek before the
+        file is loaded, so it has to go into the load itself."""
         data = self.store.snapshot()
         if track_id not in data["tracks"]:
             raise ValueError("Трек не найден")
@@ -264,7 +266,11 @@ class Engine:
             raise ValueError("Файл трека отсутствует")
         gain, trim_start, trim_end = sound_params(track, data["settings"])
         offset = trim_start
-        if source == "tag" and data["settings"].get("continue_playback"):
+        if position:
+            offset = trim_start + max(0.0, position)
+            if trim_end is not None:
+                offset = min(offset, trim_end - 0.1)
+        elif source == "tag" and data["settings"].get("continue_playback"):
             saved = self._resume_positions.get(self.current)
             if saved and saved[0] == track_id:
                 self._resume_positions.pop(self.current, None)
@@ -289,9 +295,7 @@ class Engine:
             source = "tag" if mapped == track_id else "manual"
             if source == "tag":
                 self.suppressed = None
-            self.start(track_id, source)
-            if position:
-                self.seek(position)
+            self.start(track_id, source, position)
 
     def manual_stop(self):
         with self.lock:

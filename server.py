@@ -207,6 +207,11 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
     async def value_error(request, exc):
         return JSONResponse({"error": str(exc)}, status_code=400)
 
+    @app.exception_handler(RuntimeError)  # player/mpv failures: the UI shows the message instead of a bare 500
+    async def runtime_error(request, exc):
+        LOG.exception("Request failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
     @app.exception_handler(StarletteHTTPException)  # also covers 404/405 from routing
     async def http_error(request, exc):
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)

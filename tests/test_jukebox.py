@@ -284,7 +284,9 @@ class EngineTests(unittest.TestCase):
         self.engine.manual_play("a")
         self.assertEqual(self.player.last["gain_db"], 1.5)
         self.engine.manual_play("a", position=5)
-        self.assertEqual(self.player.events[-1], ("seek", 15.0))
+        self.assertEqual(self.player.last["start"], 15.0)  # inside the load, not a seek: mpv is not ready yet
+        self.engine.manual_play("a", position=500)
+        self.assertEqual(self.player.last["start"], 89.9)
 
     def test_sound_validation(self):
         self.store.set_analysis("a", -12.0, -1.0, 60.0)
@@ -636,7 +638,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(client.put("/api/tracks/a", json={"gain_offset_db": 99}, headers=JUKEBOX).status_code, 400)
         self.assertEqual(client.post("/api/analyze", json={"track": "nope"}, headers=JUKEBOX).status_code, 400)
         self.assertEqual(client.post("/api/play", json={"track": "a", "position": 7}, headers=JUKEBOX).status_code, 200)
-        self.assertEqual(self.player.events[-1], ("seek", 7.0))  # trim was cleared above
+        self.assertEqual(self.player.last["start"], 7.0)  # trim was cleared above
         body = {"volume": 60, "read_grace_ms": 1500, "continue_playback": True, "normalize": False, "target_lufs": -14}
         client.post("/api/settings", json=body, headers=JUKEBOX)
         self.assertEqual(self.store.snapshot()["settings"]["target_lufs"], -14)
