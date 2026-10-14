@@ -17,8 +17,9 @@ LOG = logging.getLogger("jukebox.audio")
 
 
 class Player:
-    def __init__(self, volume=35, device="alsa/jukebox", mpv="mpv"):
+    def __init__(self, volume=35, device="alsa/jukebox", mpv="mpv", start_timeout=30.0):
         self.level = volume
+        self.start_timeout = start_timeout
         self.device = device
         self.mpv = [mpv] if isinstance(mpv, str) else list(mpv)
         self.elapsed = 0.0  # position at the last stop(), used for resume
@@ -45,7 +46,9 @@ class Player:
             "--load-scripts=no", "--ytdl=no", "--ao=alsa", f"--audio-device={self.device}",
             f"--volume={self.level}", f"--input-ipc-server={self.socket_path}",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + 5
+        # A cold boot on the Pi 3 can take mpv well over 5 s to get going; a timeout must not leave an
+        # orphaned process behind, or every later command would find it "alive" without a socket.
+        deadline = time.monotonic() + self.start_timeout
         while True:
             try:
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -54,9 +57,12 @@ class Player:
             except OSError:
                 sock.close()
                 if self.process.poll() is not None:
-                    raise RuntimeError(f"mpv не запустился, код {self.process.returncode}")
+                    code = self.process.returncode
+                    self._shutdown()
+                    raise RuntimeError(f"mpv не запустился, код {code}")
                 if time.monotonic() > deadline:
-                    raise RuntimeError("mpv не открыл IPC-сокет")
+                    self._shutdown()
+                    raise RuntimeError(f"mpv не открыл IPC-сокет за {self.start_timeout:.0f} с")
                 time.sleep(0.05)
         self.sock = sock
         with self.cond:
@@ -79,7 +85,7 @@ class Player:
             pass
 
     def _command(self, *command, timeout=5):
-        if not self._alive():
+        if not self._alive() or self.sock is None:
             self._start()
         with self.cond:
             self.next_id += 1

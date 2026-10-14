@@ -10,6 +10,8 @@ import sys
 import threading
 
 path = next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--input-ipc-server="))
+import time
+time.sleep(float(os.environ.get("FAKE_MPV_DELAY", "0")))  # simulates a slow start (cold boot)
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 server.listen(1)

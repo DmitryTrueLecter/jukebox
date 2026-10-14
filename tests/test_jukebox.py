@@ -330,6 +330,32 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.play_ready_sound()
 
+    def test_ready_sound_is_retried_when_mpv_is_slow(self):
+        failures = [RuntimeError("mpv не открыл IPC-сокет за 30 с")] * 2
+
+        def play(path, **kwargs):
+            if failures:
+                raise failures.pop()
+            self.player.events.append(Path(path).name)
+
+        with patch.object(self.player, "play", side_effect=play):
+            self.engine.mark_ready()
+            self.assertEqual(self.player.events, [])
+            self.assertIsNone(self.engine.audio_error)  # not shown while retries remain
+            self.engine.tick(None, 1)  # too early
+            self.engine.tick(None, 6)  # second attempt fails
+            self.engine.tick(None, 12)  # third succeeds
+        self.assertEqual(self.player.events, ["ready-default.wav"])
+        self.assertIsNone(self.engine._chime_retry)
+
+    def test_ready_sound_gives_up_after_five_attempts(self):
+        with patch.object(self.player, "play", side_effect=RuntimeError("no mpv")):
+            self.engine.mark_ready()
+            for t in (6, 12, 18, 24, 30):
+                self.engine.tick(None, t)
+        self.assertEqual(self.engine.audio_error, "no mpv")
+        self.assertIsNone(self.engine._chime_retry)
+
     def test_ready_sound_can_be_disabled_and_customized(self):
         self.store.update_settings(ready_sound=False)
         self.engine.mark_ready()
@@ -560,6 +586,16 @@ class PlayerTests(unittest.TestCase):
         fake = Path(__file__).with_name("fake_mpv.py")
         self.player = Player(volume=50, mpv=[sys.executable, str(fake)])
         self.addCleanup(self.player.close)
+
+    def test_slow_start_times_out_without_an_orphan_and_recovers(self):
+        slow = Player(volume=50, mpv=[sys.executable, str(Path(__file__).with_name("fake_mpv.py"))], start_timeout=0.3)
+        self.addCleanup(slow.close)
+        with patch.dict("os.environ", {"FAKE_MPV_DELAY": "2"}):
+            with self.assertRaisesRegex(RuntimeError, "IPC"):
+                slow.play(Path("x.mp3"))
+        self.assertIsNone(slow.process)  # killed, not left running without a socket
+        slow.play(Path("x.mp3"))  # a later attempt starts a fresh mpv
+        self.assertIsNotNone(slow.entry)
 
     def poll_until(self, seconds=2):
         deadline = time.monotonic() + seconds

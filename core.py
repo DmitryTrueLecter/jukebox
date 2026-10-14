@@ -242,6 +242,7 @@ class Engine:
         self.sounds = ReadySounds(store.root)
         self.ready = False      # the reader has answered at least once since start
         self._chime = False     # the player is busy with the ready sound, not a track
+        self._chime_retry = None  # (attempts left, not before clock time) after a failed ready sound
         self.lock = threading.RLock()
         self.current = None
         self.track = None
@@ -269,11 +270,21 @@ class Engine:
             self.ready = True
             logging.info("READY")
             if self.store.snapshot()["settings"].get("ready_sound"):
-                try:
-                    self.play_ready_sound()
-                except Exception as exc:
-                    LOG.warning("Ready sound failed: %s", exc)
-                    self.audio_error = str(exc)
+                self._chime_retry = (5, 0.0)
+                self._try_ready_sound()
+
+    def _try_ready_sound(self):
+        """One attempt at the ready chime; on failure (e.g. mpv slow at boot) schedule another in 5 s."""
+        attempts, _ = self._chime_retry
+        try:
+            self.play_ready_sound()
+            self._chime_retry = None
+        except Exception as exc:
+            attempts -= 1
+            LOG.warning("Ready sound failed (%s attempts left): %s", attempts, exc)
+            self._chime_retry = (attempts, self.clock() + 5) if attempts > 0 else None
+            if attempts == 0:
+                self.audio_error = str(exc)
 
     def play_ready_sound(self):
         """Play the chime now (also used by the "test" button). Refuses while a track is playing."""
@@ -470,6 +481,8 @@ class Engine:
             delay = data["settings"]["read_grace_ms"] / 1000
             if uid:
                 self.last_uid = uid
+            if self._chime_retry and now >= self._chime_retry[1] and self.track is None and not uid:
+                self._try_ready_sound()
             p = self.pending
             if p:
                 if now >= p["deadline"]:
