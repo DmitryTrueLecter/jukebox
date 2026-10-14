@@ -39,19 +39,52 @@ def upload_name(name):
     return name
 
 
-def register_upload(store, temp, digest, name):
-    """Validate a fully received upload and add it to the library. Removes temp."""
+def probe_audio(path):
+    """Raise ValueError unless ffprobe finds an audio stream in the file. Removes the file on failure."""
     try:
         try:
             result = subprocess.run([
                 "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
                 "-select_streams", "a:0", "-show_entries", "stream=codec_name",
-                "-of", "json", str(temp)
+                "-of", "json", str(path)
             ], capture_output=True, text=True, timeout=30, check=True)
         except subprocess.CalledProcessError as exc:
             raise ValueError("Файл не удалось распознать как аудио") from exc
         if not json.loads(result.stdout).get("streams"):
             raise ValueError("В файле не найдена аудиодорожка")
+    except BaseException:
+        Path(path).unlink(missing_ok=True)
+        raise
+
+
+async def receive(request, temp, limit):
+    """Stream the request body into `temp`, fsync it, and return the sha256. Removes temp on failure."""
+    length = int(request.headers.get("content-length") or 0)
+    if not 0 < length <= limit:
+        raise ValueError(f"Максимальный размер одного файла: {limit // (1024 * 1024)} МБ")
+    digest, received = hashlib.sha256(), 0
+    try:
+        with temp.open("xb") as output:
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > length:
+                    raise ValueError("Размер файла не совпадает с заявленным")
+                output.write(chunk)
+                digest.update(chunk)
+            if received != length:
+                raise ValueError("Загрузка оборвалась, повтори её")
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    return digest.hexdigest()
+
+
+def register_upload(store, temp, digest, name):
+    """Validate a fully received upload and add it to the library. Removes temp."""
+    try:
+        probe_audio(temp)
         with store.lock:
             existing = store.snapshot()["tracks"].get(digest)
             if existing and (store.root / "music" / existing["file"]).is_file():
@@ -96,6 +129,8 @@ class Settings(BaseModel):
     continue_playback: bool = False
     normalize: bool = True
     target_lufs: float = Field(default=-16.0, ge=-30, le=-5)
+    ready_sound: bool = True
+    ready_sound_file: Optional[str] = None  # read-only here: set by the ready-sound upload
 
 
 class Analysis(BaseModel):
@@ -130,6 +165,7 @@ class Status(BaseModel):
     position: Optional[float]
     duration: Optional[float]
     analysis: Analysis
+    ready: bool
 
 
 class TrackRef(BaseModel):
@@ -342,35 +378,41 @@ def create_app(engine, lifespan=None, static_dir=HERE / "static"):
     def settings(body: Settings):
         with engine.lock:
             engine.player.volume(body.volume)
-            engine.store.update_settings(**body.model_dump())
+            engine.store.update_settings(**body.model_dump(exclude={"ready_sound_file"}))
+        return Ok()
+
+    @post.post("/ready-sound/play", response_model=Ok)
+    def play_ready_sound():
+        engine.play_ready_sound()
+        return Ok()
+
+    @post.post("/ready-sound", response_model=Ok)
+    async def upload_ready_sound(request: Request, name: str):
+        """Custom chime: raw file bytes as the body, up to 5 MB. Replaces the built-in one."""
+        name = upload_name(name)
+        temp = engine.store.root / "sounds" / (uuid.uuid4().hex + ".part")
+        await receive(request, temp, 5 * 1024 * 1024)
+        await run_in_threadpool(probe_audio, temp)
+        with engine.lock:
+            engine.sounds.set_custom(temp, Path(name).suffix)
+            engine.store.update_settings(ready_sound_file=name[:255])
+        return Ok()
+
+    @post.delete("/ready-sound", response_model=Ok)
+    def clear_ready_sound():
+        with engine.lock:
+            engine.sounds.clear_custom()
+            engine.store.update_settings(ready_sound_file=None)
         return Ok()
 
     @post.post("/upload", response_model=Uploaded)
     async def upload(request: Request, name: str):
         """Raw file bytes as the body, original file name in ?name=."""
         name = upload_name(name)
-        length = int(request.headers.get("content-length") or 0)
-        if not 0 < length <= MAX_UPLOAD:
-            raise ValueError("Максимальный размер одного файла: 200 МБ")
         store = engine.store
         temp = store.root / "music" / (uuid.uuid4().hex + ".part")
-        digest, received = hashlib.sha256(), 0
-        try:
-            with temp.open("xb") as output:
-                async for chunk in request.stream():
-                    received += len(chunk)
-                    if received > length:
-                        raise ValueError("Размер файла не совпадает с заявленным")
-                    output.write(chunk)
-                    digest.update(chunk)
-                if received != length:
-                    raise ValueError("Загрузка оборвалась, повтори её")
-                output.flush()
-                os.fsync(output.fileno())
-        except BaseException:
-            temp.unlink(missing_ok=True)
-            raise
-        result = await run_in_threadpool(register_upload, store, temp, digest.hexdigest(), name)
+        digest = await receive(request, temp, MAX_UPLOAD)
+        result = await run_in_threadpool(register_upload, store, temp, digest, name)
         if engine.analyzer and store.snapshot()["tracks"][result["id"]]["analyzed_at"] is None:
             engine.analyzer.enqueue([result["id"]])
         return result
@@ -405,6 +447,7 @@ def worker(engine, stopping, reader=None):
                     uid = reader.read()
                     with engine.lock:
                         engine.reader_error = None
+                    engine.mark_ready()
             except Exception as exc:
                 LOG.exception("Reader failure")
                 with engine.lock:

@@ -71,6 +71,39 @@ export default function SettingsPanel({ status, volume, setVolume, run }: Props)
         «Стоп» отменяет автоматический повтор, пока диск не вынут.
       </p>
 
+      <h2 className="sub">Сигнал готовности</h2>
+      <label className="field check">
+        <input
+          type="checkbox"
+          checked={settings.ready_sound}
+          onChange={(event) => run(() => api.settings({ ...settings, ready_sound: event.target.checked }))}
+        />
+        <span>Проигрывать сигнал, когда Raspberry Pi загрузилась и готова читать диски</span>
+      </label>
+      <p className="muted small">
+        Сейчас: {settings.ready_sound_file ? <>свой файл «{settings.ready_sound_file}»</> : "встроенный сигнал"}
+        {!status.ready && " · считыватель ещё не отвечал"}
+      </p>
+      <div className="row">
+        <button onClick={() => run(api.playReadySound)}>Проиграть</button>
+        <label className="button">
+          Выбрать файл
+          <input
+            type="file"
+            accept=".mp3,.flac,.wav,.ogg,.m4a,.aac,.opus"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) run(() => api.uploadReadySound(file), `Сигнал заменён на «${file.name}»`);
+            }}
+          />
+        </label>
+        {settings.ready_sound_file && (
+          <button onClick={() => run(api.clearReadySound, "Вернул встроенный сигнал")}>Вернуть встроенный</button>
+        )}
+      </div>
+
       <h2 className="sub">Громкость треков</h2>
       <label className="field check">
         <input

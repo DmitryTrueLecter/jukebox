@@ -1,3 +1,4 @@
+import io
 import json
 import socket
 import sqlite3
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from analysis import Analyzer, Interrupted, parse_log, peaks_from_pcm
 from core import Engine, Store, auto_gain
 from player import Player
+from sounds import ReadySounds, chime_wav
 from reader import Reader, crc_a
 from fastapi.testclient import TestClient
 
@@ -190,7 +192,7 @@ class EngineTests(unittest.TestCase):
     def test_default_settings(self):
         self.assertEqual(self.store.snapshot()["settings"],
                          {"volume": 35, "read_grace_ms": 1000, "continue_playback": False,
-                          "normalize": True, "target_lufs": -16.0})
+                          "normalize": True, "target_lufs": -16.0, "ready_sound": True, "ready_sound_file": None})
     def test_player_error_visible_and_not_retried_forever(self):
         self.engine.tick("TAG_A", 1)
         with patch.object(self.player, "poll", side_effect=RuntimeError("ALSA unavailable")):
@@ -315,6 +317,31 @@ class EngineTests(unittest.TestCase):
         self.engine.tick("TAG_A", 7)
         self.assertEqual(self.player.last["start"], 20.0)
 
+    def test_ready_sound_plays_once_and_its_eof_is_silent(self):
+        self.engine.mark_ready()
+        self.engine.mark_ready()
+        self.assertEqual(self.player.events, ["ready-default.wav"])
+        self.assertTrue(self.engine.status()["ready"])
+        self.player.ended = True
+        self.engine.tick(None, 1)
+        self.assertEqual(self.engine.message, "Поднеси диск к считывателю")  # not "track finished"
+        self.engine.tick("TAG_A", 2)  # a disc during the chime wins
+        self.assertEqual(self.engine.track, "a")
+        with self.assertRaises(ValueError):
+            self.engine.play_ready_sound()
+
+    def test_ready_sound_can_be_disabled_and_customized(self):
+        self.store.update_settings(ready_sound=False)
+        self.engine.mark_ready()
+        self.assertEqual(self.player.events, [])
+        custom = self.store.root / "sounds" / "x.part"
+        custom.write_bytes(b"ogg")
+        self.engine.sounds.set_custom(custom, ".OGG")
+        self.engine.play_ready_sound()
+        self.assertEqual(self.player.events[-1], "ready.ogg")
+        self.engine.sounds.clear_custom()
+        self.assertEqual(self.engine.sounds.current().name, "ready-default.wav")
+
     def test_delete_track_cancels_its_binding_and_resume(self):
         self.store.update_settings(continue_playback=True)
         self.engine.tick("TAG_A", 1)
@@ -406,6 +433,18 @@ class AnalysisTests(unittest.TestCase):
         self.assertFalse(store.analysis_path("a").exists())
 
 
+class ChimeTests(unittest.TestCase):
+    def test_builtin_chime_is_a_short_mono_wav(self):
+        import wave
+        with wave.open(io.BytesIO(chime_wav())) as data:
+            self.assertEqual((data.getnchannels(), data.getsampwidth(), data.getframerate()), (1, 2, 44100))
+            self.assertAlmostEqual(data.getnframes() / data.getframerate(), 0.75, places=2)
+        with tempfile.TemporaryDirectory() as root:
+            sounds = ReadySounds(root)
+            self.assertTrue(sounds.default.is_file())
+            self.assertIsNone(sounds.custom())
+
+
 class StoreImportTests(unittest.TestCase):
     def test_library_json_is_imported_once(self):
         with tempfile.TemporaryDirectory() as root:
@@ -419,7 +458,8 @@ class StoreImportTests(unittest.TestCase):
             self.assertEqual(data["tracks"]["t1"]["title"], "Song")
             self.assertEqual(data["tags"], {"AA": {"track": "t1", "label": None}})  # BB pointed at a missing track
             self.assertEqual(data["settings"], {"volume": 70, "read_grace_ms": 1000, "continue_playback": True,
-                                                "normalize": True, "target_lufs": -16.0})
+                                                "normalize": True, "target_lufs": -16.0,
+                                                "ready_sound": True, "ready_sound_file": None})
             store.db.close()
             Path(root, "library.json").write_text(json.dumps({**legacy, "tracks": {}}), encoding="utf-8")
             again = Store(root)  # the DB is not empty: no second import
@@ -652,6 +692,22 @@ class HttpTests(unittest.TestCase):
         body = {"volume": 60, "read_grace_ms": 1500, "continue_playback": True, "normalize": False, "target_lufs": -14}
         client.post("/api/settings", json=body, headers=JUKEBOX)
         self.assertEqual(self.store.snapshot()["settings"]["target_lufs"], -14)
+
+    def test_ready_sound_routes(self):
+        client = self.client()
+        self.assertEqual(client.post("/api/ready-sound/play", headers=JUKEBOX).status_code, 200)
+        self.assertEqual(self.player.events[-1], "ready-default.wav")
+        with patch("server.subprocess.run") as probe:
+            probe.return_value.stdout = '{"streams":[{"codec_name":"mp3"}]}'
+            response = client.post("/api/ready-sound", params={"name": "ding.mp3"}, content=b"music", headers=JUKEBOX)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.get("/api/status").json()["settings"]["ready_sound_file"], "ding.mp3")
+        self.assertEqual(self.engine.sounds.current().name, "ready.mp3")
+        self.assertEqual(client.delete("/api/ready-sound", headers=JUKEBOX).status_code, 200)
+        self.assertIsNone(client.get("/api/status").json()["settings"]["ready_sound_file"])
+        self.assertEqual(self.engine.sounds.current().name, "ready-default.wav")
+        self.assertEqual(list((self.store.root / "sounds").glob("*.part")), [])
+        self.assertEqual(client.post("/api/ready-sound", params={"name": "x.txt"}, content=b"x", headers=JUKEBOX).status_code, 400)
 
     def test_rename_and_delete_track(self):
         client = self.client()

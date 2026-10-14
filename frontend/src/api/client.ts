@@ -32,10 +32,10 @@ export async function request<T = { ok: boolean }>(method: string, path: string,
 }
 
 /** Raw file upload with progress; fetch cannot report upload progress, so this is an XMLHttpRequest. */
-export function upload(file: File, onProgress: (fraction: number) => void): Promise<Uploaded> {
+export function upload(file: File, onProgress: (fraction: number) => void, path = "upload"): Promise<Uploaded> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/upload?name=${encodeURIComponent(file.name)}`);
+    xhr.open("POST", `/api/${path}?name=${encodeURIComponent(file.name)}`);
     xhr.setRequestHeader("X-Jukebox", "1");
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = (event) => {
@@ -72,6 +72,9 @@ export const api = {
   analyze: (what: { track?: string; all?: boolean } = {}) => request("POST", "analyze", what),
   deleteTrack: (track: string) => request("DELETE", `tracks/${encodeURIComponent(track)}`),
   upload,
+  playReadySound: () => request("POST", "ready-sound/play"),
+  uploadReadySound: (file: File) => upload(file, () => undefined, "ready-sound"),
+  clearReadySound: () => request("DELETE", "ready-sound"),
 };
 
 /** The disc's name for the UI: its label when it has one, otherwise the UID. */

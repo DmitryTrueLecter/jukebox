@@ -242,6 +242,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ready-sound/play": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Play Ready Sound */
+        post: operations["play_ready_sound_api_ready_sound_play_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ready-sound": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Ready Sound
+         * @description Custom chime: raw file bytes as the body, up to 5 MB. Replaces the built-in one.
+         */
+        post: operations["upload_ready_sound_api_ready_sound_post"];
+        /** Clear Ready Sound */
+        delete: operations["clear_ready_sound_api_ready_sound_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/upload": {
         parameters: {
             query?: never;
@@ -364,6 +402,13 @@ export interface components {
              * @default -16
              */
             target_lufs: number;
+            /**
+             * Ready Sound
+             * @default true
+             */
+            ready_sound: boolean;
+            /** Ready Sound File */
+            ready_sound_file?: string | null;
         };
         /** Status */
         Status: {
@@ -400,6 +445,8 @@ export interface components {
             /** Duration */
             duration: number | null;
             analysis: components["schemas"]["Analysis"];
+            /** Ready */
+            ready: boolean;
         };
         /**
          * Tag
@@ -974,6 +1021,101 @@ export interface operations {
                 "application/json": components["schemas"]["Settings"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    play_ready_sound_api_ready_sound_play_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_ready_sound_api_ready_sound_post: {
+        parameters: {
+            query: {
+                name: string;
+            };
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ok"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_ready_sound_api_ready_sound_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-jukebox"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

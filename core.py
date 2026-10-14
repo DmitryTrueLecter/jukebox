@@ -7,10 +7,13 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from sounds import ReadySounds
+
 LOG = logging.getLogger("jukebox")
 
 DEFAULT_SETTINGS = {"volume": 35, "read_grace_ms": 1000, "continue_playback": False,
-                    "normalize": True, "target_lufs": -16.0}
+                    "normalize": True, "target_lufs": -16.0,
+                    "ready_sound": True, "ready_sound_file": None}  # ready_sound_file: original name of a custom chime
 GAIN_LIMITS = (-30.0, 20.0)    # total gain applied by mpv, dB
 OFFSET_LIMITS = (-20.0, 20.0)  # manual per-track offset, dB
 MIN_TRIM_LENGTH = 0.5          # seconds that must remain between trim_start and trim_end
@@ -236,6 +239,9 @@ class Engine:
     def __init__(self, store, player, clock=time.monotonic, analyzer=None):
         self.store, self.player, self.clock = store, player, clock
         self.analyzer = analyzer  # optional; the server passes the background Analyzer
+        self.sounds = ReadySounds(store.root)
+        self.ready = False      # the reader has answered at least once since start
+        self._chime = False     # the player is busy with the ready sound, not a track
         self.lock = threading.RLock()
         self.current = None
         self.track = None
@@ -253,6 +259,29 @@ class Engine:
         self.player.stop()
         self.track = None
         self.source = None
+        self._chime = False
+
+    def mark_ready(self):
+        """Called by the NFC worker after the first successful poll: discs can be read from now on."""
+        with self.lock:
+            if self.ready:
+                return
+            self.ready = True
+            logging.info("READY")
+            if self.store.snapshot()["settings"].get("ready_sound"):
+                try:
+                    self.play_ready_sound()
+                except Exception as exc:
+                    LOG.warning("Ready sound failed: %s", exc)
+                    self.audio_error = str(exc)
+
+    def play_ready_sound(self):
+        """Play the chime now (also used by the "test" button). Refuses while a track is playing."""
+        with self.lock:
+            if self.track is not None:
+                raise ValueError("Сначала останови трек")
+            self.player.play(self.sounds.current())
+            self._chime = True
 
     def start(self, track_id, source, position=None):
         """`position` (seconds inside the trimmed range) overrides the start point; mpv cannot seek before the
@@ -497,6 +526,9 @@ class Engine:
                 self.stop()
                 self.message = "Ошибка воспроизведения"
                 return
+            if ended and self._chime:
+                self._chime = False  # the chime ended; not a track, nothing to repeat or announce
+                return
             if ended:
                 previous_source = self.source
                 self.track = None
@@ -531,4 +563,4 @@ class Engine:
                     "last_tag": self.last_uid, "selected_track": self.track, "playing_track": self.track, "source": self.source,
                     "pending": copy.deepcopy(self.pending), "message": self.message,
                     "reader_error": self.reader_error, "audio_error": self.audio_error,
-                    "position": position, "duration": duration, "analysis": analysis}
+                    "position": position, "duration": duration, "analysis": analysis, "ready": self.ready}
