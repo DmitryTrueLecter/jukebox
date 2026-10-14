@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, type Run, type Status, type Track } from "../api/client";
 import { formatTime } from "../format";
 import type { Playback } from "../useStatus";
+import Icon from "./Icon";
 import InlineEdit from "./InlineEdit";
 import SeekBar from "./SeekBar";
 import SoundEditor from "./SoundEditor";
@@ -43,7 +44,7 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           title={playing ? "Стоп" : "Плей"}
           onClick={() => run(playing ? api.stop : () => api.play(id))}
         >
-          {playing ? "■" : "▶"}
+          <Icon name={playing ? "stop" : "play"} size={16} />
         </button>
         <div className="track-body">
           {editing === "title" ? (
@@ -101,9 +102,15 @@ export default function TrackRow({ id, track, tags, status, playback, run }: Pro
           </div>
         </div>
         <div className="track-actions">
-          <button className={`text ${sound ? "on" : ""}`} onClick={() => setSound(!sound)} title="Громкость, обрезка и анализ трека">Звук</button>
-          <button className="icon" onClick={() => setEditing("title")} title="Переименовать">✎</button>
-          <button className="icon danger" onClick={remove} title="Удалить трек">🗑</button>
+          <button className={`icon ${sound ? "on" : ""}`} onClick={() => setSound(!sound)} title="Звук: громкость, обрезка, анализ" aria-label="Звук">
+            <Icon name="speaker" />
+          </button>
+          <button className="icon" onClick={() => setEditing("title")} title="Переименовать" aria-label="Переименовать">
+            <Icon name="pencil" />
+          </button>
+          <button className="icon danger" onClick={remove} title="Удалить трек и файл" aria-label="Удалить трек">
+            <Icon name="trash" />
+          </button>
         </div>
       </div>
       {playing && (

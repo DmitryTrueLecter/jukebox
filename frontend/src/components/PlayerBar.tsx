@@ -1,5 +1,6 @@
 import { api, tagName, type Run, type Status } from "../api/client";
 import type { Playback } from "../useStatus";
+import Icon from "./Icon";
 import SeekBar from "./SeekBar";
 
 interface Props {
@@ -27,13 +28,13 @@ export default function PlayerBar({ status, playback, volume, setVolume, run }: 
         <div className="muted small">{subtitle}</div>
       </div>
       <div className="player-center">
-        <button className={`play ${track ? "stop" : ""}`} disabled={!track} title="Стоп" onClick={() => run(api.stop)}>
-          ■
+        <button className={`play ${track ? "stop" : ""}`} disabled={!track} title="Стоп" aria-label="Стоп" onClick={() => run(api.stop)}>
+          <Icon name="stop" size={16} />
         </button>
         <SeekBar position={playback.position} duration={playback.duration} onSeek={(p) => run(() => playback.seek(p))} disabled={!track} />
       </div>
       <label className="player-volume" title={`Громкость ${volume}%`}>
-        <span aria-hidden="true">{volume === 0 ? "🔇" : volume < 50 ? "🔉" : "🔊"}</span>
+        <span className={`volume-icon ${volume === 0 ? "off" : ""}`}><Icon name="speaker" size={18} /></span>
         <input type="range" min={0} max={100} value={volume} aria-label="Громкость" onChange={(event) => setVolume(Number(event.target.value))} />
       </label>
     </footer>

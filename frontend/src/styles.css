@@ -73,9 +73,10 @@ button:hover:not(:disabled), .button:hover { background: var(--surface-2); }
 button:disabled { opacity: 0.45; cursor: default; }
 button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 button.primary:hover:not(:disabled), .button.primary:hover { filter: brightness(1.08); background: var(--accent); }
-button.icon { padding: 4px 8px; border-color: transparent; background: transparent; color: var(--muted); font-size: 15px; }
+button.icon { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); }
 button.icon:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
 button.icon.danger:hover:not(:disabled) { color: var(--error); background: var(--error-bg); }
+button.icon.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 button.link { border: 0; background: none; color: var(--accent); padding: 4px 0; }
 .button { display: inline-block; }
 input[type="search"], input[type="number"], input[type="text"], .inline-edit, .dialog input {
@@ -96,13 +97,15 @@ input[type="range"] { accent-color: var(--accent); margin: 0; }
 .track-body { flex: 1; min-width: 0; }
 .track-title { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; padding: 2px 0; }
 .track.playing .track-title { color: var(--accent); }
-.track-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
+.track-actions { display: flex; gap: 4px; opacity: 0.55; transition: opacity 0.15s; }
 .track:hover .track-actions, .track:focus-within .track-actions { opacity: 1; }
 .track-player { padding: 6px 0 2px 50px; }
 .inline-edit { width: 100%; max-width: 520px; }
 
 .play { width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; padding: 0;
-  flex-shrink: 0; font-size: 13px; background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  flex-shrink: 0; background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.play svg { margin-left: 1px; }
+.play.stop svg { margin-left: 0; }
 .play:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
 .play.stop { background: var(--surface); color: var(--text); border-color: var(--border); }
 .play.stop:hover:not(:disabled) { background: var(--surface-2); filter: none; }
@@ -156,6 +159,8 @@ input[type="range"] { accent-color: var(--accent); margin: 0; }
 .player:not(.active) .player-title { color: var(--muted); font-weight: 500; }
 .player-center { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .player-volume { display: flex; align-items: center; gap: 8px; }
+.volume-icon { display: inline-flex; color: var(--muted); }
+.volume-icon.off { opacity: 0.4; }
 .player-volume input { flex: 1; min-width: 0; }
 
 /* sound editor */
@@ -180,12 +185,8 @@ button.small { padding: 4px 9px; font-size: 13px; }
 .badge.quiet { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
 button.badge { cursor: pointer; border: 0; line-height: 1.5; }
 button.badge:hover { filter: brightness(1.15); }
-button.text { padding: 4px 9px; font-size: 13px; color: var(--muted); border-color: transparent; background: transparent; }
-button.text:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
-button.text.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .toast.info { background: var(--surface); color: var(--text); border-color: var(--border); }
 .duration { margin-left: 8px; font-weight: 400; }
-button.icon.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 h2.sub { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .row { display: flex; gap: 8px; flex-wrap: wrap; }
 
